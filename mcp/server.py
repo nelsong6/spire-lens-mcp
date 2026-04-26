@@ -5,10 +5,10 @@ as MCP tools for Claude Desktop / Claude Code.
 """
 
 import argparse
+import base64
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -32,6 +32,10 @@ def _mp_url() -> str:
 
 def _catalog_url() -> str:
     return f"{_base_url}/api/v1/catalog"
+
+
+def _screenshot_url() -> str:
+    return f"{_base_url}/api/v1/screenshot"
 
 
 async def _get(params: dict | None = None) -> str:
@@ -76,6 +80,13 @@ async def _catalog_post(body: dict) -> str:
         return r.text
 
 
+async def _screenshot_get() -> dict:
+    async with httpx.AsyncClient(timeout=20, trust_env=_trust_env) as client:
+        r = await client.get(_screenshot_url())
+        r.raise_for_status()
+        return r.json()
+
+
 
 
 def _safe_screenshot_name(name: str | None) -> str:
@@ -97,121 +108,17 @@ def _screenshot_dir() -> Path:
     return Path(tempfile.gettempdir()) / "sts2-screenshots"
 
 
-def _capture_sts2_window(output_path: Path) -> dict:
+def _save_viewport_png(output_path: Path, metadata: dict) -> dict:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    script = r'''
-param([Parameter(Mandatory = $true)][string]$OutputPath)
+    png_base64 = metadata.get("png_base64")
+    if not isinstance(png_base64, str) or not png_base64:
+        raise RuntimeError("screenshot response did not include png_base64")
 
-Add-Type -AssemblyName System.Drawing
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
+    output_path.write_bytes(base64.b64decode(png_base64))
 
-public static class Sts2CaptureNative {
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-    [DllImport("user32.dll")]
-    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll")]
-    public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct RECT {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct POINT {
-        public int X;
-        public int Y;
-    }
-}
-"@
-
-$matches = New-Object System.Collections.Generic.List[object]
-$callback = [Sts2CaptureNative+EnumWindowsProc]{
-    param([IntPtr]$hWnd, [IntPtr]$lParam)
-    if (-not [Sts2CaptureNative]::IsWindowVisible($hWnd)) { return $true }
-    $titleBuilder = New-Object System.Text.StringBuilder 512
-    [void][Sts2CaptureNative]::GetWindowText($hWnd, $titleBuilder, $titleBuilder.Capacity)
-    $title = $titleBuilder.ToString()
-    if ($title -match 'Slay the Spire 2|STS2') {
-        $rect = New-Object Sts2CaptureNative+RECT
-        if ([Sts2CaptureNative]::GetClientRect($hWnd, [ref]$rect)) {
-            $width = $rect.Right - $rect.Left
-            $height = $rect.Bottom - $rect.Top
-            if ($width -gt 0 -and $height -gt 0) {
-                $point = New-Object Sts2CaptureNative+POINT
-                $point.X = 0
-                $point.Y = 0
-                [void][Sts2CaptureNative]::ClientToScreen($hWnd, [ref]$point)
-                $matches.Add([pscustomobject]@{
-                    Handle = $hWnd
-                    Title = $title
-                    X = $point.X
-                    Y = $point.Y
-                    Width = $width
-                    Height = $height
-                }) | Out-Null
-            }
-        }
-    }
-    return $true
-}
-
-[void][Sts2CaptureNative]::EnumWindows($callback, [IntPtr]::Zero)
-$target = $matches | Sort-Object -Property Width, Height -Descending | Select-Object -First 1
-if ($null -eq $target) {
-    throw "STS2 window not found. Expected a visible window title containing 'Slay the Spire 2' or 'STS2'."
-}
-
-$bitmap = New-Object System.Drawing.Bitmap($target.Width, $target.Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-try {
-    $graphics.CopyFromScreen($target.X, $target.Y, 0, 0, $bitmap.Size)
-    $bitmap.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Png)
-} finally {
-    $graphics.Dispose()
-    $bitmap.Dispose()
-}
-
-[pscustomobject]@{
-    status = 'ok'
-    path = $OutputPath
-    width = $target.Width
-    height = $target.Height
-    target = 'sts2_window_client_area'
-    window_title = $target.Title
-    window_x = $target.X
-    window_y = $target.Y
-} | ConvertTo-Json -Compress
-'''
-
-    completed = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, "-OutputPath", str(output_path)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    if completed.returncode != 0:
-        stderr = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
-        raise RuntimeError(stderr)
-    return json.loads(completed.stdout.strip())
+    clean = {key: value for key, value in metadata.items() if key != "png_base64"}
+    clean["path"] = str(output_path)
+    return clean
 
 
 def _handle_error(e: Exception) -> str:
@@ -277,20 +184,20 @@ async def get_catalog_summary() -> str:
         return _handle_error(e)
 @mcp.tool()
 async def capture_screenshot(name: str | None = None) -> str:
-    """Capture the full visible Slay the Spire 2 game window.
+    """Capture the full Slay the Spire 2 game viewport.
 
     This is the canonical screenshot path for live validation. It captures the
-    STS2 window client area, not an arbitrary desktop region, and writes a PNG
-    under SCREENSHOT_DIR. Use this for evidence whenever a live run, combat,
-    tooltip, or UI state is being validated.
+    in-game Godot root viewport via the SpireLens MCP mod and writes a PNG under
+    SCREENSHOT_DIR. Use this for evidence whenever a live run, combat, tooltip,
+    or UI state is being validated.
 
     Args:
         name: Optional PNG file name. Unsafe characters are replaced with dashes.
     """
     try:
         output_path = _screenshot_dir() / _safe_screenshot_name(name)
-        metadata = _capture_sts2_window(output_path)
-        return json.dumps(metadata, indent=2)
+        metadata = await _screenshot_get()
+        return json.dumps(_save_viewport_png(output_path, metadata), indent=2)
     except Exception as e:
         return _handle_error(e)
 

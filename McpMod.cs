@@ -216,6 +216,13 @@ public static partial class McpMod
                 else
                     SendError(response, 405, "Method not allowed");
             }
+            else if (path == "/api/v1/screenshot")
+            {
+                if (request.HttpMethod == "GET")
+                    HandleGetScreenshot(request, response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
             else if (path == "/api/v1/multiplayer")
             {
                 // Guard: reject multiplayer endpoint during singleplayer runs
