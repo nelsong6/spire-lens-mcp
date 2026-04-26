@@ -30,6 +30,10 @@ def _mp_url() -> str:
     return f"{_base_url}/api/v1/multiplayer"
 
 
+def _catalog_url() -> str:
+    return f"{_base_url}/api/v1/catalog"
+
+
 async def _get(params: dict | None = None) -> str:
     async with httpx.AsyncClient(timeout=10, trust_env=_trust_env) as client:
         r = await client.get(_sp_url(), params=params)
@@ -54,6 +58,20 @@ async def _mp_get(params: dict | None = None) -> str:
 async def _mp_post(body: dict) -> str:
     async with httpx.AsyncClient(timeout=10, trust_env=_trust_env) as client:
         r = await client.post(_mp_url(), json=body)
+        r.raise_for_status()
+        return r.text
+
+
+async def _catalog_get() -> str:
+    async with httpx.AsyncClient(timeout=10, trust_env=_trust_env) as client:
+        r = await client.get(_catalog_url())
+        r.raise_for_status()
+        return r.text
+
+
+async def _catalog_post(body: dict) -> str:
+    async with httpx.AsyncClient(timeout=10, trust_env=_trust_env) as client:
+        r = await client.post(_catalog_url(), json=body)
         r.raise_for_status()
         return r.text
 
@@ -207,6 +225,56 @@ def _handle_error(e: Exception) -> str:
 # ---------------------------------------------------------------------------
 # General
 # ---------------------------------------------------------------------------
+@mcp.tool()
+async def lookup_card(query: str, max_matches: int = 10) -> str:
+    """Look up card identity and ownership from the live STS2 model catalog.
+
+    Use this instead of model memory whenever an issue names a card. The result
+    is structured JSON with status `ok`, `not_found`, or `ambiguous`; abort the
+    investigation on `not_found` or `ambiguous` instead of guessing.
+
+    Args:
+        query: Card id, display name, or partial name from the issue.
+        max_matches: Maximum ambiguous matches to return.
+    """
+    try:
+        return await _catalog_post({"action": "lookup_card", "query": query, "max_matches": max_matches})
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def lookup_character(query: str) -> str:
+    """Look up character identity from the live STS2 model catalog.
+
+    Use this instead of model memory whenever an issue names a character. The
+    result is structured JSON with status `ok`, `not_found`, or `ambiguous`.
+
+    Args:
+        query: Character id, display name, or partial name from the issue.
+    """
+    try:
+        return await _catalog_post({"action": "lookup_character", "query": query})
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def list_characters() -> str:
+    """List registered STS2 characters and their card-pool identifiers."""
+    try:
+        return await _catalog_post({"action": "list_characters"})
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def get_catalog_summary() -> str:
+    """Get a compact summary of the live STS2 model catalog."""
+    try:
+        return await _catalog_get()
+    except Exception as e:
+        return _handle_error(e)
 @mcp.tool()
 async def capture_screenshot(name: str | None = None) -> str:
     """Capture the full visible Slay the Spire 2 game window.
