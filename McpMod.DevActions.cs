@@ -112,6 +112,7 @@ public static partial class McpMod
     private static Dictionary<string, object?> ExecuteDevSetSpireLensViewStatsEnabled(Dictionary<string, JsonElement> data)
     {
         bool enabled = GetBool(data, "enabled", true);
+        bool verboseHandStats = GetBool(data, "verbose_hand_stats", true);
         var bridgeType = AppDomain.CurrentDomain.GetAssemblies()
             .Select(a => a.GetType("SpireLens.Loader.RuntimeOptionsBridge", throwOnError: false))
             .FirstOrDefault(t => t != null);
@@ -125,11 +126,16 @@ public static partial class McpMod
 
         setMethod.Invoke(null, new object[] { enabled });
 
+        var setVerboseMethod = bridgeType.GetMethod("SetVerboseHandStatsEnabled", BindingFlags.Public | BindingFlags.Static);
+        if (setVerboseMethod != null)
+            setVerboseMethod.Invoke(null, new object[] { verboseHandStats });
+
         return new Dictionary<string, object?>
         {
             ["status"] = "ok",
-            ["message"] = $"SpireLens View Stats set to {enabled}.",
-            ["enabled"] = enabled
+            ["message"] = $"SpireLens View Stats set to {enabled}; verbose hand stats set to {verboseHandStats}.",
+            ["enabled"] = enabled,
+            ["verbose_hand_stats"] = verboseHandStats
         };
     }
 

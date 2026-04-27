@@ -738,17 +738,20 @@ async def bridge_health() -> str:
 
 
 @mcp.tool()
-async def set_spirelens_view_stats_enabled(enabled: bool = True) -> str:
+async def set_spirelens_view_stats_enabled(enabled: bool = True, verbose_hand_stats: bool = True) -> str:
     """Turn SpireLens View Stats on or off through the in-game runtime bridge.
 
     Use this before capturing SpireLens card-stat tooltip evidence. It sets the
     same persisted option as the in-game View Stats checkbox, without requiring
-    the deck view to be opened manually first.
+    the deck view to be opened manually first. Test/automation calls default
+    `verbose_hand_stats` to true so in-hand card-stat screenshots show the full
+    evidence surface; normal player config still defaults this option off.
     """
     try:
         return await _post({
             "action": "dev_set_spirelens_view_stats_enabled",
             "enabled": enabled,
+            "verbose_hand_stats": verbose_hand_stats,
         })
     except Exception as e:
         return _handle_error(e)
