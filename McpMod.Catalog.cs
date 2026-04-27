@@ -130,9 +130,9 @@ public static partial class McpMod
             },
             ["relic_surfaces"] = new List<Dictionary<string, object?>>
             {
-                BuildRelicValidationSurface("player_relic_bar", "owned relics shown in the active run UI", false),
-                BuildRelicValidationSurface("relic_select", "active choose-a-relic overlay", true),
-                BuildRelicValidationSurface("treasure", "active treasure room relic rewards", true)
+                BuildRelicValidationSurface("player_relic_bar", "owned relics shown in the active run UI", false, true, true),
+                BuildRelicValidationSurface("relic_select", "active choose-a-relic overlay", true, true, true),
+                BuildRelicValidationSurface("treasure", "active treasure room relic rewards", true, true, true)
             },
             ["recommended_tooltip_evidence_flow"] = new[]
             {
@@ -142,6 +142,12 @@ public static partial class McpMod
                 "show_card_tooltip(surface, card_id=target_id)",
                 "capture_screenshot",
                 "close_card_pile() when a pile view was opened"
+            },
+            ["recommended_relic_tooltip_evidence_flow"] = new[]
+            {
+                "list_visible_relics(surface)",
+                "show_relic_tooltip(surface, relic_id=target_id)",
+                "capture_screenshot"
             },
             ["screenshot_contract"] = new Dictionary<string, object?>
             {
@@ -262,6 +268,28 @@ public static partial class McpMod
                 outputContract: "JSON with status ok, surface, card_index, card_id, card_name, visible_cards[].",
                 commonFailures: new[] { "target card not visible", "ambiguous duplicate card_id without card_index", "surface not open" },
                 examples: new[] { "show_card_tooltip(surface=\"hand\", card_id=\"MAKE_IT_SO\")", "show_card_tooltip(surface=\"deck\", card_id=\"BASH\")" }),
+            BuildValidationTool(
+                "list_visible_relics",
+                "ui_evidence",
+                "List relic holders currently visible on a tooltip-capable surface so later calls can target by stable relic id or index.",
+                mutatesState: false,
+                requiresGameRunning: true,
+                requiresCombat: false,
+                safeForPlanning: false,
+                outputContract: "JSON with status ok, surface, count, relics[] containing index/relic_id/relic_name/global_position.",
+                commonFailures: new[] { "surface not open", "player relic bar unavailable", "empty relic surface" },
+                examples: new[] { "list_visible_relics(surface=\"player_relic_bar\")", "list_visible_relics(surface=\"treasure\")" }),
+            BuildValidationTool(
+                "show_relic_tooltip",
+                "ui_evidence",
+                "Force the game to create hover tooltips for a visible relic holder, preferably selected by relic_id.",
+                mutatesState: true,
+                requiresGameRunning: true,
+                requiresCombat: false,
+                safeForPlanning: false,
+                outputContract: "JSON with status ok, surface, relic_index, relic_id, relic_name, visible_relics[].",
+                commonFailures: new[] { "target relic not visible", "ambiguous duplicate relic_id without relic_index", "surface not open" },
+                examples: new[] { "show_relic_tooltip(surface=\"player_relic_bar\", relic_id=\"PEN_NIB\")", "show_relic_tooltip(surface=\"treasure\", relic_name=\"Pen Nib\")" }),
             BuildValidationTool(
                 "open_card_pile",
                 "ui_navigation",
@@ -391,7 +419,9 @@ public static partial class McpMod
     private static Dictionary<string, object?> BuildRelicValidationSurface(
         string name,
         string description,
-        bool screenSpecific)
+        bool screenSpecific,
+        bool supportsListVisibleRelics,
+        bool supportsShowRelicTooltip)
         => new()
         {
             ["name"] = name,
@@ -399,8 +429,10 @@ public static partial class McpMod
             ["screen_specific"] = screenSpecific,
             ["state_source"] = "get_game_state",
             ["supports_relic_id_lookup"] = true,
+            ["supports_list_visible_relics"] = supportsListVisibleRelics,
+            ["supports_show_relic_tooltip"] = supportsShowRelicTooltip,
             ["supports_screenshot"] = true,
-            ["notes"] = "Current MCP evidence can confirm visible relic identity/state through get_game_state and screenshots. Dedicated forced relic-hover support is a future capability."
+            ["notes"] = "Use list_visible_relics then show_relic_tooltip before capture_screenshot for relic tooltip evidence."
         };
 
     private static Dictionary<string, object?> ExecuteCatalogLookupCharacter(Dictionary<string, JsonElement> data)
