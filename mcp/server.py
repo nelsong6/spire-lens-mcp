@@ -559,6 +559,20 @@ async def validate_current_run_save() -> str:
 
 
 @mcp.tool()
+async def load_current_run_save() -> str:
+    """Load STS2's current_run.save through the game's saved-run path.
+
+    Use after `install_save_as_current` while no run is in progress. This
+    bypasses menu UI and directly performs the lower-level saved-run sequence:
+    deserialize save, create RunState, set up saved singleplayer, and load run.
+    """
+    try:
+        return await _post({"action": "dev_load_current_run_save"})
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
 async def get_game_state(format: str = "markdown") -> str:
     """Get the current Slay the Spire 2 game state.
 

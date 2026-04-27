@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Threading.Tasks;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.DevConsole;
@@ -12,6 +13,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
@@ -52,6 +54,7 @@ public static partial class McpMod
             "dev_list_scenario_commands" => ExecuteDevListScenarioCommands(),
             "dev_run_scenario_command" => ExecuteDevRunScenarioCommand(data),
             "dev_validate_current_run_save" => ExecuteDevValidateCurrentRunSave(),
+            "dev_load_current_run_save" => ExecuteDevLoadCurrentRunSave(),
             "dev_configure_run_deck" => ExecuteDevConfigureRunDeck(data),
             "dev_enter_room" => ExecuteDevEnterRoom(data),
             "dev_configure_test_combat" => ExecuteDevConfigureTestCombat(data),
@@ -146,6 +149,49 @@ public static partial class McpMod
             ["status"] = "ok",
             ["message"] = $"Entering debug room: {roomType}."
         };
+    }
+
+    private static Dictionary<string, object?> ExecuteDevLoadCurrentRunSave()
+    {
+        if (NGame.Instance == null)
+            return Error("NGame.Instance is not available yet.");
+        if (RunManager.Instance.IsInProgress)
+            return Error("A run is already in progress. Return to main menu before loading a current run save.");
+
+        var loaded = SaveManager.Instance.LoadRunSave();
+        if (!loaded.Success || loaded.SaveData == null)
+            return Error($"Failed to load current run save: {loaded.Status} {loaded.ErrorMessage}");
+
+        try
+        {
+            var save = loaded.SaveData;
+            var runState = RunState.FromSerializable(save);
+            TaskHelper.RunSafely(LoadCurrentRunSaveAsync(runState, save));
+        }
+        catch (Exception ex)
+        {
+            return Error($"Load current run failed: {ex.GetBaseException().Message}");
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = "Requested loading current_run.save using the game's saved-run path.",
+            ["schema_version"] = loaded.SaveData.SchemaVersion,
+            ["ascension"] = loaded.SaveData.Ascension,
+            ["current_act_index"] = loaded.SaveData.CurrentActIndex,
+            ["next_step"] = "Poll get_game_state until the run leaves the menu."
+        };
+    }
+
+    private static async Task LoadCurrentRunSaveAsync(RunState runState, SerializableRun save)
+    {
+        if (NGame.Instance == null)
+            throw new InvalidOperationException("NGame.Instance is not available.");
+
+        await RunManager.Instance.SetUpSavedSinglePlayer(runState, save);
+        NGame.Instance.ReactionContainer.InitializeNetworking(new NetSingleplayerGameService());
+        await NGame.Instance.LoadRun(runState, save.PreFinishedRoom);
     }
 
     private static Dictionary<string, object?> ExecuteDevValidateCurrentRunSave()
