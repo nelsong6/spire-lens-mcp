@@ -759,8 +759,10 @@ async def list_visible_cards(surface: str = "hand") -> str:
     """List visible cards on a UI surface without changing hover state.
 
     Use this before `show_card_tooltip` to discover stable card ids and visible
-    indices. Supported surfaces match show_card_tooltip: hand, card_select/deck/grid,
-    and card_reward/reward.
+    indices. For deck/draw/discard/exhaust evidence, call `open_card_pile`
+    first so the game shows the relevant pile UI. Supported surfaces match
+    show_card_tooltip: hand, deck, draw_pile, discard_pile, exhaust_pile,
+    card_select/grid, and card_reward/reward.
     """
     try:
         return await _post({
@@ -788,6 +790,8 @@ async def show_card_tooltip(
 
     Args:
         surface: Visible UI surface containing the target card.
+            Use `open_card_pile` first for deck, draw_pile, discard_pile, and
+            exhaust_pile.
         card_index: 0-based card index on that surface. When card_id/card_name
             matches multiple visible cards, card_index disambiguates.
         card_id: Optional card id such as MAKE_IT_SO. Prefer this over an index
@@ -805,6 +809,38 @@ async def show_card_tooltip(
         body["card_name"] = card_name
     try:
         return await _post(body)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def open_card_pile(pile: str = "deck") -> str:
+    """Open a real in-game card pile view for visual inspection and screenshots.
+
+    Use this when evidence requires seeing a card that is not in hand. After the
+    pile opens, call `list_visible_cards(surface=...)`, `show_card_tooltip`, and
+    `capture_screenshot`. Supported piles:
+    - `deck`: the full run deck view
+    - `draw_pile`: the current combat draw pile
+    - `discard_pile`: the current combat discard pile
+    - `exhaust_pile`: the current combat exhaust pile
+    """
+    try:
+        return await _post({
+            "action": "dev_open_card_pile",
+            "pile": pile,
+        })
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def close_card_pile() -> str:
+    """Close the active card pile or deck view opened for MCP inspection."""
+    try:
+        return await _post({
+            "action": "dev_close_card_pile",
+        })
     except Exception as e:
         return _handle_error(e)
 

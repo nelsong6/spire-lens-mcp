@@ -6,12 +6,14 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Godot;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.DevConsole;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Multiplayer;
@@ -72,6 +74,8 @@ public static partial class McpMod
             "dev_enter_room" => ExecuteDevEnterRoom(data),
             "dev_configure_live_combat" => ExecuteDevConfigureLiveCombat(data),
             "dev_set_spirelens_view_stats_enabled" => ExecuteDevSetSpireLensViewStatsEnabled(data),
+            "dev_open_card_pile" => ExecuteDevOpenCardPile(data),
+            "dev_close_card_pile" => ExecuteDevCloseCardPile(),
             "dev_list_visible_cards" => ExecuteDevListVisibleCards(data),
             "dev_show_card_tooltip" => ExecuteDevShowCardTooltip(data),
             _ => Error($"Unknown dev action: {action}")
@@ -187,6 +191,85 @@ public static partial class McpMod
             ["count"] = holders.Count,
             ["cards"] = BuildVisibleCardList(holders)
         };
+    }
+
+    private static Dictionary<string, object?> ExecuteDevOpenCardPile(Dictionary<string, JsonElement> data)
+    {
+        string pile = NormalizeCardPileSurface(GetString(data, "pile", "deck"));
+
+        if (!RunManager.Instance.IsInProgress)
+            return Error("No run in progress.");
+
+        var runState = RunManager.Instance.DebugOnlyGetState();
+        var player = runState != null ? LocalContext.GetMe(runState) : null;
+        if (player == null)
+            return Error("Could not find local player.");
+
+        switch (pile)
+        {
+            case "deck":
+                NDeckViewScreen.ShowScreen(player);
+                break;
+
+            case "draw_pile":
+            case "discard_pile":
+            case "exhaust_pile":
+                if (player.PlayerCombatState == null)
+                    return Error($"{pile} can only be opened during combat.");
+                var cards = GetCombatPileCards(player, pile);
+                if (cards.Count == 0)
+                    return Error($"{pile} is empty.");
+                var prefs = new CardSelectorPrefs(new LocString("", ToCardPileTitle(pile)), minCount: 0, maxCount: 0)
+                {
+                    Cancelable = true,
+                    RequireManualConfirmation = false,
+                    PretendCardsCanBePlayed = true
+                };
+                NOverlayStack.Instance?.Push(NDeckCardSelectScreen.Create(cards, prefs));
+                break;
+
+            default:
+                return Error($"Unknown card pile '{pile}'. Expected deck, draw_pile, discard_pile, or exhaust_pile.");
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = $"Opened {pile}. Use list_visible_cards(surface=\"{pile}\") or show_card_tooltip(surface=\"{pile}\", ...), then capture_screenshot for evidence.",
+            ["surface"] = pile
+        };
+    }
+
+    private static Dictionary<string, object?> ExecuteDevCloseCardPile()
+    {
+        var overlay = NOverlayStack.Instance?.Peek();
+        if (overlay is NCardGridSelectionScreen or NChooseACardSelectionScreen)
+        {
+            NOverlayStack.Instance!.Remove(overlay);
+            return new Dictionary<string, object?>
+            {
+                ["status"] = "ok",
+                ["message"] = "Closed the active card pile overlay."
+            };
+        }
+
+        var deckView = TryFindActiveDeckView();
+        if (deckView != null)
+        {
+            var returnMethod = typeof(NCardsViewScreen).GetMethod(
+                "OnReturnButtonPressed",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            if (returnMethod == null)
+                return Error("NCardsViewScreen.OnReturnButtonPressed could not be found.");
+            returnMethod.Invoke(deckView, new object?[] { null });
+            return new Dictionary<string, object?>
+            {
+                ["status"] = "ok",
+                ["message"] = "Closed the active deck view."
+            };
+        }
+
+        return Error("No card pile or deck view is open.");
     }
 
     private static void ClearVisibleCardHoverTips(IEnumerable<NCardHolder> holders)
@@ -1035,8 +1118,27 @@ public static partial class McpMod
                 holders = hand.ActiveHolders.Cast<NCardHolder>().ToList();
                 return true;
 
+            case "draw":
+            case "draw_pile":
+            case "discard":
+            case "discard_pile":
+            case "exhaust":
+            case "exhaust_pile":
+                var pileOverlay = NOverlayStack.Instance?.Peek();
+                if (pileOverlay is NCardGridSelectionScreen pileGridScreen)
+                {
+                    holders = FindAllSortedByPosition<NGridCardHolder>(pileGridScreen).Cast<NCardHolder>().ToList();
+                    return true;
+                }
+                if (pileOverlay is NChooseACardSelectionScreen pileChooseScreen)
+                {
+                    holders = FindAllSortedByPosition<NGridCardHolder>(pileChooseScreen).Cast<NCardHolder>().ToList();
+                    return true;
+                }
+                error = $"No card pile view is open for surface '{surface}'. Call open_card_pile(pile=\"{NormalizeCardPileSurface(surface)}\") first.";
+                return false;
+
             case "card_select":
-            case "deck":
             case "grid":
                 var selectOverlay = NOverlayStack.Instance?.Peek();
                 if (selectOverlay is NCardGridSelectionScreen gridScreen)
@@ -1052,6 +1154,22 @@ public static partial class McpMod
                 error = "No card selection grid is open.";
                 return false;
 
+            case "deck":
+                var deckView = TryFindActiveDeckView();
+                if (deckView != null)
+                {
+                    holders = FindAllSortedByPosition<NGridCardHolder>(deckView).Cast<NCardHolder>().ToList();
+                    return true;
+                }
+                var deckOverlay = NOverlayStack.Instance?.Peek();
+                if (deckOverlay is NCardGridSelectionScreen deckGridScreen)
+                {
+                    holders = FindAllSortedByPosition<NGridCardHolder>(deckGridScreen).Cast<NCardHolder>().ToList();
+                    return true;
+                }
+                error = "No deck view or card selection grid is open. Call open_card_pile(pile=\"deck\") first.";
+                return false;
+
             case "card_reward":
             case "reward":
                 var rewardOverlay = NOverlayStack.Instance?.Peek();
@@ -1064,9 +1182,57 @@ public static partial class McpMod
                 return true;
 
             default:
-                error = $"Unknown surface '{surface}'. Expected hand, card_select, deck, grid, or card_reward.";
+                error = $"Unknown surface '{surface}'. Expected hand, deck, draw_pile, discard_pile, exhaust_pile, card_select, grid, or card_reward.";
                 return false;
         }
+    }
+
+    private static string NormalizeCardPileSurface(string value)
+    {
+        var normalized = value.Trim().ToLowerInvariant().Replace("-", "_").Replace(" ", "_");
+        return normalized switch
+        {
+            "draw" or "drawpile" or "draw_pile" => "draw_pile",
+            "discard" or "discardpile" or "discard_pile" => "discard_pile",
+            "exhaust" or "exhaustpile" or "exhaust_pile" => "exhaust_pile",
+            "deck" or "full_deck" or "run_deck" => "deck",
+            _ => normalized
+        };
+    }
+
+    private static IReadOnlyList<CardModel> GetCombatPileCards(Player player, string pile)
+    {
+        var combatState = player.PlayerCombatState;
+        if (combatState == null)
+            return Array.Empty<CardModel>();
+
+        return pile switch
+        {
+            "draw_pile" => combatState.DrawPile.Cards.ToList(),
+            "discard_pile" => combatState.DiscardPile.Cards.ToList(),
+            "exhaust_pile" => combatState.ExhaustPile.Cards.ToList(),
+            _ => Array.Empty<CardModel>()
+        };
+    }
+
+    private static string ToCardPileTitle(string pile)
+        => pile switch
+        {
+            "draw_pile" => "Draw Pile",
+            "discard_pile" => "Discard Pile",
+            "exhaust_pile" => "Exhaust Pile",
+            _ => "Card Pile"
+        };
+
+    private static NDeckViewScreen? TryFindActiveDeckView()
+    {
+        var root = NGame.Instance?.GetTree()?.Root;
+        if (root == null)
+            return null;
+
+        return FindAll<NDeckViewScreen>(root)
+            .Where(screen => GodotObject.IsInstanceValid(screen) && screen.IsVisibleInTree())
+            .LastOrDefault();
     }
 
     private static bool CardHolderMatches(NCardHolder holder, string cardId, string cardName)
