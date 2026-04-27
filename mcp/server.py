@@ -726,6 +726,47 @@ async def reload_spirelens_core() -> str:
 
 
 @mcp.tool()
+async def set_spirelens_view_stats_enabled(enabled: bool = True) -> str:
+    """Turn SpireLens View Stats on or off through the in-game runtime bridge.
+
+    Use this before capturing SpireLens card-stat tooltip evidence. It sets the
+    same persisted option as the in-game View Stats checkbox, without requiring
+    the deck view to be opened manually first.
+    """
+    try:
+        return await _post({
+            "action": "dev_set_spirelens_view_stats_enabled",
+            "enabled": enabled,
+        })
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def show_card_tooltip(surface: str = "hand", card_index: int = 0) -> str:
+    """Force the game to show hover tooltips for a visible card holder.
+
+    Use this immediately before `capture_screenshot` when validating card-facing
+    tooltip or text behavior. Supported surfaces:
+    - `hand`: visible combat hand cards
+    - `card_select` / `deck` / `grid`: visible card grid selection overlays
+    - `card_reward` / `reward`: visible card reward choices
+
+    Args:
+        surface: Visible UI surface containing the target card.
+        card_index: 0-based card index on that surface, as reported by game state.
+    """
+    try:
+        return await _post({
+            "action": "dev_show_card_tooltip",
+            "surface": surface,
+            "card_index": card_index,
+        })
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
 async def start_singleplayer_run(character: str = "Ironclad", ascension: int = 0, seed: str | None = None) -> str:
     """Start a dev singleplayer run without clicking through the main menu.
 

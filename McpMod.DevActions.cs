@@ -15,10 +15,18 @@ using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Cards;
+using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
+using MegaCrit.Sts2.Core.Nodes.CommonUi;
+using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Saves.Runs;
+using MegaCrit.Sts2.Core.Nodes.Rewards;
+using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 
 namespace SpireLens.Mcp;
 
@@ -59,6 +67,8 @@ public static partial class McpMod
             "dev_replace_run_deck_and_save" => ExecuteDevReplaceRunDeckAndSave(data),
             "dev_enter_room" => ExecuteDevEnterRoom(data),
             "dev_configure_test_combat" => ExecuteDevConfigureTestCombat(data),
+            "dev_set_spirelens_view_stats_enabled" => ExecuteDevSetSpireLensViewStatsEnabled(data),
+            "dev_show_card_tooltip" => ExecuteDevShowCardTooltip(data),
             _ => Error($"Unknown dev action: {action}")
         };
 
@@ -87,6 +97,57 @@ public static partial class McpMod
             ["status"] = "ok",
             ["message"] = "Requested SpireLens Core hot reload.",
             ["reload_number"] = reloadNumber
+        };
+    }
+
+    private static Dictionary<string, object?> ExecuteDevSetSpireLensViewStatsEnabled(Dictionary<string, JsonElement> data)
+    {
+        bool enabled = GetBool(data, "enabled", true);
+        var bridgeType = AppDomain.CurrentDomain.GetAssemblies()
+            .Select(a => a.GetType("SpireLens.Loader.RuntimeOptionsBridge", throwOnError: false))
+            .FirstOrDefault(t => t != null);
+
+        if (bridgeType == null)
+            return Error("SpireLens runtime options bridge was not found in the current AppDomain.");
+
+        var setMethod = bridgeType.GetMethod("SetViewStatsToggleEnabled", BindingFlags.Public | BindingFlags.Static);
+        if (setMethod == null)
+            return Error("SpireLens runtime options bridge does not expose SetViewStatsToggleEnabled(bool).");
+
+        setMethod.Invoke(null, new object[] { enabled });
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = $"SpireLens View Stats set to {enabled}.",
+            ["enabled"] = enabled
+        };
+    }
+
+    private static Dictionary<string, object?> ExecuteDevShowCardTooltip(Dictionary<string, JsonElement> data)
+    {
+        string surface = GetString(data, "surface", "hand").ToLowerInvariant();
+        int index = GetInt(data, "card_index", 0);
+
+        if (!TryResolveCardHolder(surface, index, out var holder, out var error))
+            return Error(error);
+
+        var cardName = SafeGetText(() => holder!.CardModel?.Title) ?? "unknown";
+        var createHoverTips = typeof(NCardHolder).GetMethod(
+            "CreateHoverTips",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (createHoverTips == null)
+            return Error("NCardHolder.CreateHoverTips could not be found.");
+
+        createHoverTips.Invoke(holder, null);
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = $"Showing hover tooltip for {surface}[{index}]: {cardName}.",
+            ["surface"] = surface,
+            ["card_index"] = index,
+            ["card_name"] = cardName
         };
     }
 
@@ -800,6 +861,71 @@ public static partial class McpMod
         => data.TryGetValue(key, out var elem) && elem.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? elem.GetBoolean()
             : fallback;
+
+    private static bool TryResolveCardHolder(
+        string surface,
+        int index,
+        out NCardHolder? holder,
+        out string error)
+    {
+        holder = null;
+        error = "";
+
+        IReadOnlyList<NCardHolder> holders;
+        switch (surface)
+        {
+            case "hand":
+                var hand = NPlayerHand.Instance;
+                if (hand == null)
+                {
+                    error = "Player hand is not available.";
+                    return false;
+                }
+                holders = hand.ActiveHolders.Cast<NCardHolder>().ToList();
+                break;
+
+            case "card_select":
+            case "deck":
+            case "grid":
+                var selectOverlay = NOverlayStack.Instance?.Peek();
+                if (selectOverlay is NCardGridSelectionScreen gridScreen)
+                {
+                    holders = FindAllSortedByPosition<NGridCardHolder>(gridScreen).Cast<NCardHolder>().ToList();
+                    break;
+                }
+                if (selectOverlay is NChooseACardSelectionScreen chooseScreen)
+                {
+                    holders = FindAllSortedByPosition<NGridCardHolder>(chooseScreen).Cast<NCardHolder>().ToList();
+                    break;
+                }
+                error = "No card selection grid is open.";
+                return false;
+
+            case "card_reward":
+            case "reward":
+                var rewardOverlay = NOverlayStack.Instance?.Peek();
+                if (rewardOverlay is not NCardRewardSelectionScreen rewardScreen)
+                {
+                    error = "Card reward selection screen is not open.";
+                    return false;
+                }
+                holders = FindAllSortedByPosition<NCardHolder>(rewardScreen);
+                break;
+
+            default:
+                error = $"Unknown surface '{surface}'. Expected hand, card_select, deck, grid, or card_reward.";
+                return false;
+        }
+
+        if (index < 0 || index >= holders.Count)
+        {
+            error = $"card_index {index} out of range for {surface} ({holders.Count} cards available).";
+            return false;
+        }
+
+        holder = holders[index];
+        return true;
+    }
 
     private static IReadOnlyList<string> GetStringArray(Dictionary<string, JsonElement> data, string key)
     {
