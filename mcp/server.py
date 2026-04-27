@@ -321,6 +321,44 @@ async def enter_debug_room(room_type: str = "monster") -> str:
         return _handle_error(e)
 
 
+@mcp.tool()
+async def configure_test_combat(
+    hand: list[str] | None = None,
+    draw_pile: list[str] | None = None,
+    discard_pile: list[str] | None = None,
+    exhaust_pile: list[str] | None = None,
+    enemy_hp: int = 999,
+) -> str:
+    """Configure the current combat into a deterministic validation fixture.
+
+    Default validation should use a simple early/debug monster with high HP and
+    controlled card piles. Use this after `start_singleplayer_run` and
+    `enter_debug_room("Monster")`. For card/UI smoke tests, put the target card
+    and the needed setup cards directly into `hand`, then capture target-visible
+    screenshots. If an issue needs kills, enemy powers/statuses, multiple
+    enemies, or special enemy behavior, the investigation phase should say why
+    the default fixture is insufficient.
+
+    Args:
+        hand: Card ids or exact names to put in hand, left to right.
+        draw_pile: Card ids or exact names to put in draw pile.
+        discard_pile: Card ids or exact names to put in discard pile.
+        exhaust_pile: Card ids or exact names to put in exhaust pile.
+        enemy_hp: HP to set on all living enemies. Defaults to 999.
+    """
+    try:
+        return await _post({
+            "action": "dev_configure_test_combat",
+            "hand": hand or [],
+            "draw_pile": draw_pile or [],
+            "discard_pile": discard_pile or [],
+            "exhaust_pile": exhaust_pile or [],
+            "enemy_hp": enemy_hp,
+        })
+    except Exception as e:
+        return _handle_error(e)
+
+
 # ---------------------------------------------------------------------------
 # Combat (state_type: monster / elite / boss)
 # ---------------------------------------------------------------------------
