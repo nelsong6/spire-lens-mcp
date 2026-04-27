@@ -324,11 +324,16 @@ async def enter_debug_room(room_type: str = "monster") -> str:
 
 @mcp.tool()
 async def configure_test_combat(
+    deck: list[str] | None = None,
     hand: list[str] | None = None,
     draw_pile: list[str] | None = None,
     discard_pile: list[str] | None = None,
     exhaust_pile: list[str] | None = None,
     enemy_hp: int = 999,
+    energy: int | None = None,
+    stars: int | None = None,
+    player_powers: list[dict] | None = None,
+    enemy_powers: list[dict] | None = None,
 ) -> str:
     """Configure the current combat into a deterministic validation fixture.
 
@@ -341,21 +346,34 @@ async def configure_test_combat(
     the default fixture is insufficient.
 
     Args:
+        deck: Card ids or exact names to make the permanent deck for this scenario.
         hand: Card ids or exact names to put in hand, left to right.
         draw_pile: Card ids or exact names to put in draw pile.
         discard_pile: Card ids or exact names to put in discard pile.
         exhaust_pile: Card ids or exact names to put in exhaust pile.
         enemy_hp: HP to set on all living enemies. Defaults to 999.
+        energy: Optional exact current player energy.
+        stars: Optional exact current Regent stars.
+        player_powers: Optional list like [{"power": "Artifact", "amount": 1}].
+        enemy_powers: Optional list like [{"power": "Poison", "amount": 5, "target_index": 0}].
     """
     try:
-        return await _post({
+        body: dict = {
             "action": "dev_configure_test_combat",
+            "deck": deck or [],
             "hand": hand or [],
             "draw_pile": draw_pile or [],
             "discard_pile": discard_pile or [],
             "exhaust_pile": exhaust_pile or [],
             "enemy_hp": enemy_hp,
-        })
+            "player_powers": player_powers or [],
+            "enemy_powers": enemy_powers or [],
+        }
+        if energy is not None:
+            body["energy"] = energy
+        if stars is not None:
+            body["stars"] = stars
+        return await _post(body)
     except Exception as e:
         return _handle_error(e)
 
@@ -363,11 +381,16 @@ async def configure_test_combat(
 @mcp.tool()
 async def prepare_test_combat(
     character: str = "Ironclad",
+    deck: list[str] | None = None,
     hand: list[str] | None = None,
     draw_pile: list[str] | None = None,
     discard_pile: list[str] | None = None,
     exhaust_pile: list[str] | None = None,
     enemy_hp: int = 999,
+    energy: int | None = None,
+    stars: int | None = None,
+    player_powers: list[dict] | None = None,
+    enemy_powers: list[dict] | None = None,
     seed: str | None = None,
 ) -> str:
     """Prepare a deterministic single-combat scenario in one call.
@@ -379,11 +402,16 @@ async def prepare_test_combat(
 
     Args:
         character: Character id or display name for the run.
+        deck: Card ids or exact names to make the permanent deck for this scenario.
         hand: Card ids or exact names to put in hand, left to right.
         draw_pile: Card ids or exact names to put in draw pile.
         discard_pile: Card ids or exact names to put in discard pile.
         exhaust_pile: Card ids or exact names to put in exhaust pile.
         enemy_hp: HP to set on all living enemies. Defaults to 999.
+        energy: Optional exact current player energy.
+        stars: Optional exact current Regent stars.
+        player_powers: Optional list like [{"power": "Artifact", "amount": 1}].
+        enemy_powers: Optional list like [{"power": "Poison", "amount": 5, "target_index": 0}].
         seed: Optional run seed when a new run must be started.
     """
     try:
@@ -407,14 +435,22 @@ async def prepare_test_combat(
             await _post({"action": "dev_enter_room", "room_type": "Monster"})
             await _wait_for_state(lambda s: s.get("state_type") in {"monster", "elite", "boss"}, timeout_seconds=20)
 
-        return await _post({
+        body = {
             "action": "dev_configure_test_combat",
+            "deck": deck or [],
             "hand": hand or [],
             "draw_pile": draw_pile or [],
             "discard_pile": discard_pile or [],
             "exhaust_pile": exhaust_pile or [],
             "enemy_hp": enemy_hp,
-        })
+            "player_powers": player_powers or [],
+            "enemy_powers": enemy_powers or [],
+        }
+        if energy is not None:
+            body["energy"] = energy
+        if stars is not None:
+            body["stars"] = stars
+        return await _post(body)
     except Exception as e:
         return _handle_error(e)
 

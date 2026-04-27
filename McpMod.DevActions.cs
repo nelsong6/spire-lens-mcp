@@ -6,6 +6,8 @@ using System.Text.Json;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
@@ -148,7 +150,13 @@ public static partial class McpMod
         var drawCards = GetStringArray(data, "draw_pile");
         var discardCards = GetStringArray(data, "discard_pile");
         var exhaustCards = GetStringArray(data, "exhaust_pile");
+        var deckCards = GetStringArray(data, "deck");
 
+        if (deckCards.Count > 0)
+        {
+            ClearPile(player.Deck);
+            AddCardsToDeck(runState, player, deckCards);
+        }
         if (clearHand) ClearPile(player.PlayerCombatState.Hand);
         if (clearDraw) ClearPile(player.PlayerCombatState.DrawPile);
         if (clearDiscard) ClearPile(player.PlayerCombatState.DiscardPile);
@@ -156,14 +164,21 @@ public static partial class McpMod
 
         var added = new Dictionary<string, object?>
         {
+            ["deck"] = deckCards.Count > 0 ? BuildCardList(player.Deck.Cards) : null,
             ["hand"] = AddCardsToPile(combatState, player, player.PlayerCombatState.Hand, handCards),
             ["draw_pile"] = AddCardsToPile(combatState, player, player.PlayerCombatState.DrawPile, drawCards),
             ["discard_pile"] = AddCardsToPile(combatState, player, player.PlayerCombatState.DiscardPile, discardCards),
             ["exhaust_pile"] = AddCardsToPile(combatState, player, player.PlayerCombatState.ExhaustPile, exhaustCards)
         };
 
+        if (TryGetNullableInt(data, "energy", out var energy) && energy.HasValue)
+            player.PlayerCombatState.Energy = energy.Value;
+        if (TryGetNullableInt(data, "stars", out var stars) && stars.HasValue)
+            player.PlayerCombatState.Stars = stars.Value;
+
         var enemies = new List<Dictionary<string, object?>>();
-        foreach (var enemy in combatState.Enemies.Where(e => e.IsAlive))
+        var livingEnemies = combatState.Enemies.Where(e => e.IsAlive).ToList();
+        foreach (var enemy in livingEnemies)
         {
             SetCreatureHp(enemy, enemyHp);
             enemies.Add(new Dictionary<string, object?>
@@ -175,14 +190,21 @@ public static partial class McpMod
             });
         }
 
+        var playerPowers = ApplyPowerSpecs(data, "player_powers", [player.Creature]);
+        var enemyPowers = ApplyPowerSpecs(data, "enemy_powers", livingEnemies);
+
         return new Dictionary<string, object?>
         {
             ["status"] = "ok",
             ["message"] = "Configured current combat for deterministic test validation.",
             ["default_fixture"] = "single durable early/debug monster, high HP, controlled piles",
             ["enemy_hp"] = enemyHp,
+            ["energy"] = player.PlayerCombatState.Energy,
+            ["stars"] = player.PlayerCombatState.Stars,
             ["enemies"] = enemies,
             ["added"] = added,
+            ["player_powers"] = playerPowers,
+            ["enemy_powers"] = enemyPowers,
             ["next_step"] = "Call get_game_state, then capture target-visible screenshot evidence."
         };
     }
@@ -202,6 +224,37 @@ public static partial class McpMod
             ?.Invoke(creature, new object[] { (decimal)hp });
     }
 
+    private static List<Dictionary<string, object?>> AddCardsToDeck(
+        MegaCrit.Sts2.Core.Runs.RunState runState,
+        Player player,
+        IReadOnlyList<string> cardIds)
+    {
+        var added = new List<Dictionary<string, object?>>();
+        foreach (var cardId in cardIds)
+        {
+            var canonical = FindCardById(cardId);
+            if (canonical == null)
+            {
+                added.Add(new Dictionary<string, object?>
+                {
+                    ["id"] = cardId,
+                    ["status"] = "not_found"
+                });
+                continue;
+            }
+
+            var card = runState.CreateCard(canonical, player);
+            player.Deck.AddInternal(card, player.Deck.Cards.Count, true);
+            added.Add(new Dictionary<string, object?>
+            {
+                ["id"] = card.Id.Entry,
+                ["name"] = SafeGetText(() => card.Title),
+                ["status"] = "ok"
+            });
+        }
+        return added;
+    }
+
     private static List<Dictionary<string, object?>> AddCardsToPile(
         ICombatState combatState,
         MegaCrit.Sts2.Core.Entities.Players.Player player,
@@ -211,7 +264,7 @@ public static partial class McpMod
         var added = new List<Dictionary<string, object?>>();
         foreach (var cardId in cardIds)
         {
-            var canonical = FindCardById(cardId);
+            var canonical = FindDeckCardById(player, cardId) ?? FindCardById(cardId);
             if (canonical == null)
             {
                 added.Add(new Dictionary<string, object?>
@@ -234,6 +287,21 @@ public static partial class McpMod
         return added;
     }
 
+    private static List<Dictionary<string, object?>> BuildCardList(IEnumerable<CardModel> cards)
+        => cards.Select(card => new Dictionary<string, object?>
+        {
+            ["id"] = card.Id.Entry,
+            ["name"] = SafeGetText(() => card.Title)
+        }).ToList();
+
+    private static CardModel? FindDeckCardById(Player player, string cardId)
+    {
+        if (string.IsNullOrWhiteSpace(cardId)) return null;
+        return player.Deck.Cards.FirstOrDefault(card =>
+            card.Id.Entry.Equals(cardId, StringComparison.OrdinalIgnoreCase)
+            || (SafeGetText(() => card.Title)?.Equals(cardId, StringComparison.OrdinalIgnoreCase) ?? false));
+    }
+
     private static CardModel? FindCardById(string cardId)
     {
         if (string.IsNullOrWhiteSpace(cardId)) return null;
@@ -246,6 +314,89 @@ public static partial class McpMod
         return null;
     }
 
+    private static List<Dictionary<string, object?>> ApplyPowerSpecs(
+        Dictionary<string, JsonElement> data,
+        string key,
+        IReadOnlyList<Creature> targets)
+    {
+        var result = new List<Dictionary<string, object?>>();
+        if (!data.TryGetValue(key, out var elem) || elem.ValueKind != JsonValueKind.Array)
+            return result;
+
+        foreach (var spec in elem.EnumerateArray())
+        {
+            if (spec.ValueKind != JsonValueKind.Object)
+                continue;
+
+            string power = GetString(spec, "power", "");
+            int amount = GetInt(spec, "amount", 1);
+            int targetIndex = GetInt(spec, "target_index", -1);
+            var selectedTargets = targetIndex >= 0 && targetIndex < targets.Count
+                ? new[] { targets[targetIndex] }
+                : targets;
+
+            foreach (var target in selectedTargets)
+            {
+                result.Add(ApplyPower(target, power, amount));
+            }
+        }
+        return result;
+    }
+
+    private static Dictionary<string, object?> ApplyPower(Creature target, string powerName, int amount)
+    {
+        var powerType = FindPowerType(powerName);
+        if (powerType == null)
+            return new Dictionary<string, object?>
+            {
+                ["power"] = powerName,
+                ["status"] = "not_found"
+            };
+
+        if (Activator.CreateInstance(powerType) is not PowerModel power)
+            return new Dictionary<string, object?>
+            {
+                ["power"] = powerName,
+                ["status"] = "create_failed"
+            };
+
+        try
+        {
+            power.ApplyInternal(target, amount, true);
+            return new Dictionary<string, object?>
+            {
+                ["power"] = powerType.Name,
+                ["target"] = SafeGetText(() => target.Monster?.Title) ?? "player",
+                ["amount"] = amount,
+                ["status"] = "ok"
+            };
+        }
+        catch (Exception ex)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["power"] = powerType.Name,
+                ["amount"] = amount,
+                ["status"] = "error",
+                ["error"] = ex.Message
+            };
+        }
+    }
+
+    private static Type? FindPowerType(string powerName)
+    {
+        if (string.IsNullOrWhiteSpace(powerName)) return null;
+        string normalized = NormalizeCatalogKey(powerName);
+        if (!normalized.EndsWith("power", StringComparison.Ordinal))
+            normalized += "power";
+
+        return typeof(PowerModel).Assembly.GetTypes()
+            .FirstOrDefault(type =>
+                typeof(PowerModel).IsAssignableFrom(type)
+                && !type.IsAbstract
+                && NormalizeCatalogKey(type.Name) == normalized);
+    }
+
     private static string GetString(Dictionary<string, JsonElement> data, string key, string fallback)
     {
         if (!data.TryGetValue(key, out var elem) || elem.ValueKind == JsonValueKind.Null)
@@ -256,6 +407,32 @@ public static partial class McpMod
 
     private static int GetInt(Dictionary<string, JsonElement> data, string key, int fallback)
         => data.TryGetValue(key, out var elem) && elem.TryGetInt32(out var value) ? value : fallback;
+
+    private static int GetInt(JsonElement data, string key, int fallback)
+        => data.ValueKind == JsonValueKind.Object
+           && data.TryGetProperty(key, out var elem)
+           && elem.TryGetInt32(out var value)
+            ? value
+            : fallback;
+
+    private static string GetString(JsonElement data, string key, string fallback)
+    {
+        if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty(key, out var elem) || elem.ValueKind == JsonValueKind.Null)
+            return fallback;
+        var value = elem.GetString();
+        return string.IsNullOrWhiteSpace(value) ? fallback : value;
+    }
+
+    private static bool TryGetNullableInt(Dictionary<string, JsonElement> data, string key, out int? value)
+    {
+        value = null;
+        if (!data.TryGetValue(key, out var elem) || elem.ValueKind == JsonValueKind.Null)
+            return false;
+        if (!elem.TryGetInt32(out var parsed))
+            return false;
+        value = parsed;
+        return true;
+    }
 
     private static bool GetBool(Dictionary<string, JsonElement> data, string key, bool fallback)
         => data.TryGetValue(key, out var elem) && elem.ValueKind is JsonValueKind.True or JsonValueKind.False
