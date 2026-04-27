@@ -149,6 +149,44 @@ def _current_run_save_path() -> Path:
     return _user_data_dir() / "steam" / "76561198062015438" / "modded" / "profile1" / "saves" / "current_run.save"
 
 
+def _steam_remote_current_run_save_path() -> Path | None:
+    configured = os.environ.get("STS2_STEAM_REMOTE_CURRENT_RUN_SAVE")
+    if configured and configured.strip():
+        return Path(configured)
+
+    appdata_current = _current_run_save_path()
+    marker = ("modded", "profile1", "saves", "current_run.save")
+    parts = appdata_current.parts
+    suffix_start = None
+    for i in range(0, len(parts) - len(marker) + 1):
+        if tuple(parts[i : i + len(marker)]) == marker:
+            suffix_start = i
+            break
+    suffix = Path(*parts[suffix_start:]) if suffix_start is not None else Path(*marker)
+
+    candidates: list[Path] = []
+    for root in [
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "Steam" / "userdata",
+        Path(os.environ.get("ProgramFiles", "")) / "Steam" / "userdata",
+    ]:
+        if root.exists():
+            candidates.extend(root.glob(f"*/2868840/remote/{suffix.as_posix()}"))
+            candidates.extend(remote / suffix for remote in root.glob("*/2868840/remote") if remote.is_dir())
+
+    existing = [p for p in candidates if p.exists()]
+    if existing:
+        return max(existing, key=lambda p: p.stat().st_mtime)
+    return candidates[0] if candidates else None
+
+
+def _current_run_save_targets() -> list[Path]:
+    targets = [_current_run_save_path()]
+    remote = _steam_remote_current_run_save_path()
+    if remote and remote not in targets:
+        targets.append(remote)
+    return targets
+
+
 def _safe_save_name(name: str) -> str:
     value = (name or "").strip()
     value = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._-")
@@ -194,6 +232,11 @@ def _normalize_card_id(card_id: str) -> str:
 def _normalize_relic_id(relic_id: str) -> str:
     value = relic_id.strip().upper()
     return value if value.startswith("RELIC.") else f"RELIC.{value}"
+
+
+def _normalize_encounter_id(encounter_id: str) -> str:
+    value = encounter_id.strip().upper()
+    return value if value.startswith("ENCOUNTER.") else f"ENCOUNTER.{value}"
 
 
 def _card_entry(card_id: str, floor_added_to_deck: int = 1) -> dict:
@@ -414,6 +457,7 @@ async def materialize_scenario_save(
     current_hp: int | None = None,
     max_hp: int | None = None,
     max_energy: int | None = None,
+    next_normal_encounter: str | None = None,
 ) -> str:
     """Create a derived scenario save by editing stable JSON save fields.
 
@@ -434,6 +478,8 @@ async def materialize_scenario_save(
         current_hp: Optional exact current HP.
         max_hp: Optional exact max HP.
         max_energy: Optional exact max energy.
+        next_normal_encounter: Optional encounter id to place at the next normal
+            encounter slot, e.g. FUZZY_WURM_CRAWLER_WEAK.
     """
     try:
         base_path = _named_save_path(_base_save_dir(), base_name)
@@ -487,6 +533,21 @@ async def materialize_scenario_save(
         if max_energy is not None:
             player["max_energy"] = max_energy
 
+        if next_normal_encounter is not None:
+            acts = edited.get("acts")
+            if not isinstance(acts, list) or not acts or not isinstance(acts[0], dict):
+                raise ValueError("save does not contain acts[0]")
+            rooms = acts[0].get("rooms")
+            if not isinstance(rooms, dict):
+                raise ValueError("save does not contain acts[0].rooms")
+            normal_ids = rooms.get("normal_encounter_ids")
+            if not isinstance(normal_ids, list) or not normal_ids:
+                raise ValueError("save does not contain normal_encounter_ids")
+            visited = rooms.get("normal_encounters_visited")
+            index = visited if isinstance(visited, int) else 0
+            index = max(0, min(index, len(normal_ids) - 1))
+            normal_ids[index] = _normalize_encounter_id(next_normal_encounter)
+
         _write_save_json(output_path, edited)
         return json.dumps({
             "status": "ok",
@@ -508,7 +569,9 @@ async def install_save_as_current(name: str, kind: str = "scenario") -> str:
     """Install a managed base/scenario save as STS2's current_run.save.
 
     A timestamped backup of the previous current run save is written next to it.
-    Use this before launching/loading STS2 to validate a derived scenario save.
+    On Steam builds this writes both the AppData working save and the Steam
+    userdata remote mirror, because STS2 syncs the remote mirror back over
+    AppData on launch when the two disagree. Use this while STS2 is closed.
 
     Args:
         name: Managed save name without extension.
@@ -520,26 +583,32 @@ async def install_save_as_current(name: str, kind: str = "scenario") -> str:
         if not source.exists():
             raise FileNotFoundError(source)
 
-        current = _current_run_save_path()
-        current.parent.mkdir(parents=True, exist_ok=True)
-        companion = current.with_name(f"{current.name}.backup")
-        backup = None
-        if current.exists():
-            backup = current.with_name(f"{current.stem}.backup-{int(__import__('time').time())}{current.suffix}")
-            backup.write_bytes(current.read_bytes())
         bytes_to_install = source.read_bytes()
-        current.write_bytes(bytes_to_install)
-        companion.write_bytes(bytes_to_install)
+        installed = []
+        for current in _current_run_save_targets():
+            current.parent.mkdir(parents=True, exist_ok=True)
+            companion = current.with_name(f"{current.name}.backup")
+            backup = None
+            if current.exists():
+                backup = current.with_name(f"{current.stem}.backup-{int(__import__('time').time())}{current.suffix}")
+                backup.write_bytes(current.read_bytes())
+            current.write_bytes(bytes_to_install)
+            companion.write_bytes(bytes_to_install)
+            installed.append({
+                "current_run_save": str(current),
+                "current_run_backup": str(companion),
+                "previous_backup": str(backup) if backup else None,
+                "bytes": current.stat().st_size,
+                "sha256": _sha256(current),
+            })
 
         return json.dumps({
             "status": "ok",
             "installed": str(source),
-            "current_run_save": str(current),
-            "current_run_backup": str(companion),
-            "backup": str(backup) if backup else None,
-            "bytes": current.stat().st_size,
-            "sha256": _sha256(current),
-            "next_step": "Call validate_current_run_save while the MCP mod is running, or restart/load the game and inspect get_game_state.",
+            "targets": installed,
+            "target_count": len(installed),
+            "sha256": _sha256(source),
+            "next_step": "Launch STS2 after installing, then load the run and inspect get_game_state.",
         }, indent=2)
     except Exception as e:
         return _handle_error(e)
@@ -737,6 +806,35 @@ async def configure_run_deck(deck: list[str]) -> str:
     """
     try:
         return await _post({"action": "dev_configure_run_deck", "deck": deck})
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def replace_run_deck_and_save(
+    deck: list[str],
+    update_combat_piles: bool = True,
+    persist: bool = True,
+) -> str:
+    """Replace the live run deck in-game and optionally persist it.
+
+    Unlike offline save-file editing, this mutates the currently loaded
+    RunState and asks the game to write the save through SaveManager. In combat,
+    `update_combat_piles` also replaces hand/draw/discard/exhaust so the visible
+    state matches the permanent deck immediately.
+
+    Args:
+        deck: Card ids or exact names to make the permanent deck.
+        update_combat_piles: If in combat, also replace visible combat piles.
+        persist: If true, call the game's own SaveManager.SaveRun.
+    """
+    try:
+        return await _post({
+            "action": "dev_replace_run_deck_and_save",
+            "deck": deck,
+            "update_combat_piles": update_combat_piles,
+            "persist": persist,
+        })
     except Exception as e:
         return _handle_error(e)
 

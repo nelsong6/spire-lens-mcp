@@ -56,6 +56,7 @@ public static partial class McpMod
             "dev_validate_current_run_save" => ExecuteDevValidateCurrentRunSave(),
             "dev_load_current_run_save" => ExecuteDevLoadCurrentRunSave(),
             "dev_configure_run_deck" => ExecuteDevConfigureRunDeck(data),
+            "dev_replace_run_deck_and_save" => ExecuteDevReplaceRunDeckAndSave(data),
             "dev_enter_room" => ExecuteDevEnterRoom(data),
             "dev_configure_test_combat" => ExecuteDevConfigureTestCombat(data),
             _ => Error($"Unknown dev action: {action}")
@@ -325,6 +326,76 @@ public static partial class McpMod
         };
     }
 
+    private static Dictionary<string, object?> ExecuteDevReplaceRunDeckAndSave(Dictionary<string, JsonElement> data)
+    {
+        if (!RunManager.Instance.IsInProgress)
+            return Error("No run in progress.");
+
+        var runState = RunManager.Instance.DebugOnlyGetState();
+        if (runState == null)
+            return Error("Run state is unavailable.");
+
+        var player = LocalContext.GetMe(runState);
+        if (player == null)
+            return Error("Player is unavailable.");
+
+        var deckCards = GetStringArray(data, "deck");
+        if (deckCards.Count == 0)
+            return Error("Missing non-empty 'deck'.");
+
+        bool updateCombatPiles = GetBool(data, "update_combat_piles", true);
+        bool persist = GetBool(data, "persist", true);
+
+        ClearPile(player.Deck);
+        var added = AddCardsToDeck(runState, player, deckCards);
+
+        var updatedPiles = false;
+        if (updateCombatPiles && player.PlayerCombatState != null)
+        {
+            ClearPile(player.PlayerCombatState.Hand);
+            ClearPile(player.PlayerCombatState.DrawPile);
+            ClearPile(player.PlayerCombatState.DiscardPile);
+            ClearPile(player.PlayerCombatState.ExhaustPile);
+
+            var cards = player.Deck.Cards.ToList();
+            for (int i = 0; i < cards.Count; i++)
+            {
+                var destination = i < 5
+                    ? player.PlayerCombatState.Hand
+                    : player.PlayerCombatState.DrawPile;
+                destination.AddInternal(cards[i], destination.Cards.Count, true);
+            }
+            updatedPiles = true;
+        }
+
+        var saveStatus = "not_requested";
+        if (persist)
+        {
+            try
+            {
+                TaskHelper.RunSafely(SaveManager.Instance.SaveRun(null));
+                saveStatus = "requested";
+            }
+            catch (Exception ex)
+            {
+                saveStatus = $"error: {ex.GetBaseException().Message}";
+            }
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = saveStatus.StartsWith("error:", StringComparison.Ordinal) ? "error" : "ok",
+            ["message"] = "Replaced the live run deck through the in-game RunState.",
+            ["deck"] = BuildCardList(player.Deck.Cards),
+            ["added"] = added,
+            ["updated_combat_piles"] = updatedPiles,
+            ["save_status"] = saveStatus,
+            ["next_step"] = persist
+                ? "Poll validate_current_run_save until the saved deck reflects this live deck."
+                : "Call this again with persist=true to write through the game's SaveManager."
+        };
+    }
+
     private static Dictionary<string, object?> ExecuteDevConfigureTestCombat(Dictionary<string, JsonElement> data)
     {
         if (!RunManager.Instance.IsInProgress)
@@ -357,6 +428,7 @@ public static partial class McpMod
         var deckCards = GetStringArray(data, "deck");
         if (deckCards.Count > 0)
             return Error("Deck changes must be applied before combat starts. Use dev_configure_run_deck, then enter combat, then configure combat piles.");
+        var combatCardPool = ExtractCombatCardPool(player.PlayerCombatState);
         if (clearHand) ClearPile(player.PlayerCombatState.Hand);
         if (clearDraw) ClearPile(player.PlayerCombatState.DrawPile);
         if (clearDiscard) ClearPile(player.PlayerCombatState.DiscardPile);
@@ -365,10 +437,10 @@ public static partial class McpMod
         var added = new Dictionary<string, object?>
         {
             ["deck"] = BuildCardList(player.Deck.Cards),
-            ["hand"] = MoveExistingCardsToPile(player, player.PlayerCombatState.Hand, handCards),
-            ["draw_pile"] = MoveExistingCardsToPile(player, player.PlayerCombatState.DrawPile, drawCards),
-            ["discard_pile"] = MoveExistingCardsToPile(player, player.PlayerCombatState.DiscardPile, discardCards),
-            ["exhaust_pile"] = MoveExistingCardsToPile(player, player.PlayerCombatState.ExhaustPile, exhaustCards)
+            ["hand"] = MoveCardsFromPool(combatCardPool, player.PlayerCombatState.Hand, handCards),
+            ["draw_pile"] = MoveCardsFromPool(combatCardPool, player.PlayerCombatState.DrawPile, drawCards),
+            ["discard_pile"] = MoveCardsFromPool(combatCardPool, player.PlayerCombatState.DiscardPile, discardCards),
+            ["exhaust_pile"] = MoveCardsFromPool(combatCardPool, player.PlayerCombatState.ExhaustPile, exhaustCards)
         };
 
         if (TryGetNullableInt(data, "energy", out var energy) && energy.HasValue)
@@ -414,6 +486,17 @@ public static partial class McpMod
         foreach (var card in pile.Cards.ToList())
             pile.RemoveInternal(card, true);
     }
+
+    private static List<CardModel> ExtractCombatCardPool(PlayerCombatState playerCombatState)
+        => new[]
+        {
+            playerCombatState.Hand,
+            playerCombatState.DrawPile,
+            playerCombatState.DiscardPile,
+            playerCombatState.ExhaustPile
+        }
+        .SelectMany(pile => pile.Cards.ToList())
+        .ToList();
 
     private static void SetCreatureHp(MegaCrit.Sts2.Core.Entities.Creatures.Creature creature, int hp)
     {
@@ -510,6 +593,36 @@ public static partial class McpMod
         return added;
     }
 
+    private static List<Dictionary<string, object?>> MoveCardsFromPool(
+        List<CardModel> pool,
+        CardPile destination,
+        IReadOnlyList<string> cardIds)
+    {
+        var added = new List<Dictionary<string, object?>>();
+        foreach (var cardId in cardIds)
+        {
+            var match = FindAndRemovePooledCombatCard(pool, cardId);
+            if (match == null)
+            {
+                added.Add(new Dictionary<string, object?>
+                {
+                    ["id"] = cardId,
+                    ["status"] = "not_found"
+                });
+                continue;
+            }
+
+            destination.AddInternal(match, destination.Cards.Count, true);
+            added.Add(new Dictionary<string, object?>
+            {
+                ["id"] = match.Id.Entry,
+                ["name"] = SafeGetText(() => match.Title),
+                ["status"] = "ok"
+            });
+        }
+        return added;
+    }
+
     private static CardModel? FindAndRemoveExistingCombatCard(IEnumerable<CardPile> sources, string cardId)
     {
         foreach (var source in sources)
@@ -523,6 +636,17 @@ public static partial class McpMod
             return match;
         }
         return null;
+    }
+
+    private static CardModel? FindAndRemovePooledCombatCard(List<CardModel> pool, string cardId)
+    {
+        var match = pool.FirstOrDefault(card =>
+            card.Id.Entry.Equals(cardId, StringComparison.OrdinalIgnoreCase)
+            || (SafeGetText(() => card.Title)?.Equals(cardId, StringComparison.OrdinalIgnoreCase) ?? false));
+        if (match == null) return null;
+
+        pool.Remove(match);
+        return match;
     }
 
     private static List<Dictionary<string, object?>> BuildCardList(IEnumerable<CardModel> cards)
