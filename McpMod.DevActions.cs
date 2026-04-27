@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Godot;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.DevConsole;
@@ -128,27 +129,72 @@ public static partial class McpMod
     {
         string surface = GetString(data, "surface", "hand").ToLowerInvariant();
         int index = GetInt(data, "card_index", 0);
+        string cardId = GetString(data, "card_id", "");
+        string cardNameQuery = GetString(data, "card_name", "");
 
-        if (!TryResolveCardHolder(surface, index, out var holder, out var error))
+        if (!TryResolveCardHolder(surface, index, cardId, cardNameQuery, out var holder, out var holders, out var resolvedIndex, out var error))
             return Error(error);
 
         var cardName = SafeGetText(() => holder!.CardModel?.Title) ?? "unknown";
-        var createHoverTips = typeof(NCardHolder).GetMethod(
-            "CreateHoverTips",
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        if (createHoverTips == null)
-            return Error("NCardHolder.CreateHoverTips could not be found.");
+        try
+        {
+            ClearVisibleCardHoverTips(holders);
 
-        createHoverTips.Invoke(holder, null);
+            var createHoverTips = typeof(NCardHolder).GetMethod(
+                "CreateHoverTips",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (createHoverTips == null)
+                return Error("NCardHolder.CreateHoverTips could not be found.");
+
+            createHoverTips.Invoke(holder, null);
+        }
+        catch (TargetInvocationException ex)
+        {
+            var inner = ex.InnerException?.GetBaseException() ?? ex.GetBaseException();
+            return Error($"NCardHolder tooltip invocation failed for {surface}[{resolvedIndex}] {cardName}: {inner.GetType().Name}: {inner.Message}");
+        }
+        catch (Exception ex)
+        {
+            return Error($"NCardHolder tooltip invocation failed for {surface}[{resolvedIndex}] {cardName}: {ex.GetBaseException().Message}");
+        }
 
         return new Dictionary<string, object?>
         {
             ["status"] = "ok",
-            ["message"] = $"Showing hover tooltip for {surface}[{index}]: {cardName}.",
+            ["message"] = $"Showing hover tooltip for {surface}[{resolvedIndex}]: {cardName}.",
             ["surface"] = surface,
-            ["card_index"] = index,
-            ["card_name"] = cardName
+            ["card_index"] = resolvedIndex,
+            ["card_id"] = holder!.CardModel?.Id.Entry,
+            ["card_name"] = cardName,
+            ["visible_cards"] = holders.Select((h, i) => new Dictionary<string, object?>
+            {
+                ["index"] = i,
+                ["card_id"] = h.CardModel?.Id.Entry,
+                ["card_name"] = SafeGetText(() => h.CardModel?.Title) ?? "unknown"
+            }).ToList()
         };
+    }
+
+    private static void ClearVisibleCardHoverTips(IEnumerable<NCardHolder> holders)
+    {
+        var clearHoverTips = typeof(NCardHolder).GetMethod(
+            "ClearHoverTips",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (clearHoverTips == null)
+            return;
+
+        foreach (var candidate in holders)
+        {
+            try
+            {
+                if (GodotObject.IsInstanceValid(candidate))
+                    clearHoverTips.Invoke(candidate, null);
+            }
+            catch
+            {
+                // Best effort: stale hover cleanup should not prevent showing the requested tooltip.
+            }
+        }
     }
 
     private static Dictionary<string, object?> ExecuteDevStartSingleplayerRun(Dictionary<string, JsonElement> data)
@@ -865,13 +911,18 @@ public static partial class McpMod
     private static bool TryResolveCardHolder(
         string surface,
         int index,
+        string cardId,
+        string cardName,
         out NCardHolder? holder,
+        out IReadOnlyList<NCardHolder> holders,
+        out int resolvedIndex,
         out string error)
     {
         holder = null;
+        holders = Array.Empty<NCardHolder>();
+        resolvedIndex = index;
         error = "";
 
-        IReadOnlyList<NCardHolder> holders;
         switch (surface)
         {
             case "hand":
@@ -917,6 +968,36 @@ public static partial class McpMod
                 return false;
         }
 
+        if (!string.IsNullOrWhiteSpace(cardId) || !string.IsNullOrWhiteSpace(cardName))
+        {
+            var matches = holders
+                .Select((candidate, i) => new { Holder = candidate, Index = i })
+                .Where(item => CardHolderMatches(item.Holder, cardId, cardName))
+                .ToList();
+            if (matches.Count == 0)
+            {
+                error = $"No {surface} card matched card_id '{cardId}' or card_name '{cardName}'. Available cards: {FormatCardHolderList(holders)}.";
+                return false;
+            }
+            if (matches.Count > 1)
+            {
+                var indexedMatch = matches.FirstOrDefault(m => m.Index == index);
+                if (indexedMatch != null)
+                {
+                    holder = indexedMatch.Holder;
+                    resolvedIndex = indexedMatch.Index;
+                    return true;
+                }
+
+                error = $"Multiple {surface} cards matched card_id '{cardId}' or card_name '{cardName}'. Matching indices: {string.Join(", ", matches.Select(m => m.Index))}. Use card_index to disambiguate.";
+                return false;
+            }
+
+            holder = matches[0].Holder;
+            resolvedIndex = matches[0].Index;
+            return true;
+        }
+
         if (index < 0 || index >= holders.Count)
         {
             error = $"card_index {index} out of range for {surface} ({holders.Count} cards available).";
@@ -926,6 +1007,39 @@ public static partial class McpMod
         holder = holders[index];
         return true;
     }
+
+    private static bool CardHolderMatches(NCardHolder holder, string cardId, string cardName)
+    {
+        if (!string.IsNullOrWhiteSpace(cardId))
+        {
+            var query = NormalizeCardLookupValue(cardId);
+            var id = NormalizeCardLookupValue(holder.CardModel?.Id.Entry ?? "");
+            if (id.Equals(query, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(cardName))
+        {
+            var query = NormalizeCardLookupValue(cardName);
+            var title = NormalizeCardLookupValue(SafeGetText(() => holder.CardModel?.Title) ?? "");
+            if (title.Equals(query, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static string NormalizeCardLookupValue(string value)
+    {
+        var normalized = value.Trim();
+        if (normalized.StartsWith("CARD.", StringComparison.OrdinalIgnoreCase))
+            normalized = normalized["CARD.".Length..];
+        return normalized.Replace(" ", "_").Replace("-", "_");
+    }
+
+    private static string FormatCardHolderList(IReadOnlyList<NCardHolder> holders)
+        => string.Join(", ", holders.Select((h, i) =>
+            $"{i}:{h.CardModel?.Id.Entry ?? "unknown"}:{SafeGetText(() => h.CardModel?.Title) ?? "unknown"}"));
 
     private static IReadOnlyList<string> GetStringArray(Dictionary<string, JsonElement> data, string key)
     {

@@ -743,7 +743,12 @@ async def set_spirelens_view_stats_enabled(enabled: bool = True) -> str:
 
 
 @mcp.tool()
-async def show_card_tooltip(surface: str = "hand", card_index: int = 0) -> str:
+async def show_card_tooltip(
+    surface: str = "hand",
+    card_index: int = 0,
+    card_id: str | None = None,
+    card_name: str | None = None,
+) -> str:
     """Force the game to show hover tooltips for a visible card holder.
 
     Use this immediately before `capture_screenshot` when validating card-facing
@@ -754,14 +759,23 @@ async def show_card_tooltip(surface: str = "hand", card_index: int = 0) -> str:
 
     Args:
         surface: Visible UI surface containing the target card.
-        card_index: 0-based card index on that surface, as reported by game state.
+        card_index: 0-based card index on that surface. When card_id/card_name
+            matches multiple visible cards, card_index disambiguates.
+        card_id: Optional card id such as MAKE_IT_SO. Prefer this over an index
+            when a specific visible card matters.
+        card_name: Optional display name such as Make It So.
     """
+    body: dict = {
+        "action": "dev_show_card_tooltip",
+        "surface": surface,
+        "card_index": card_index,
+    }
+    if card_id:
+        body["card_id"] = card_id
+    if card_name:
+        body["card_name"] = card_name
     try:
-        return await _post({
-            "action": "dev_show_card_tooltip",
-            "surface": surface,
-            "card_index": card_index,
-        })
+        return await _post(body)
     except Exception as e:
         return _handle_error(e)
 
