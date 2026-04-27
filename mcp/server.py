@@ -368,6 +368,20 @@ async def list_characters() -> str:
 
 
 @mcp.tool()
+async def get_validation_capabilities() -> str:
+    """Return cold metadata about available validation/evidence surfaces.
+
+    Use this during test planning before writing screenshot or live-validation
+    evidence contracts. It describes which card surfaces can be opened, listed,
+    tooltipped, and screenshotted, plus the runtime options automation enables.
+    """
+    try:
+        return await _catalog_post({"action": "get_validation_capabilities"})
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
 async def get_catalog_summary() -> str:
     """Get a compact summary of the live STS2 model catalog."""
     try:

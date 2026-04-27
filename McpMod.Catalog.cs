@@ -68,6 +68,7 @@ public static partial class McpMod
             "list_cards" => ExecuteCatalogListCards(data),
             "lookup_character" => ExecuteCatalogLookupCharacter(data),
             "list_characters" => BuildCatalogCharactersResult(),
+            "get_validation_capabilities" => BuildValidationCapabilities(),
             _ => Error($"Unknown catalog action: {action}")
         };
 
@@ -89,6 +90,79 @@ public static partial class McpMod
         {
             ["status"] = "ok",
             ["characters"] = GetCatalogCharacters().Select(BuildCatalogCharacterInfo).ToList()
+        };
+
+    private static Dictionary<string, object?> BuildValidationCapabilities()
+        => new()
+        {
+            ["status"] = "ok",
+            ["version"] = 1,
+            ["purpose"] = "Cold metadata describing the live-validation surfaces that later agent phases may use.",
+            ["runtime_options"] = new Dictionary<string, object?>
+            {
+                ["view_stats"] = new Dictionary<string, object?>
+                {
+                    ["tool"] = "set_spirelens_view_stats_enabled",
+                    ["default_enabled_for_validation"] = true,
+                    ["notes"] = "Enables SpireLens card-stat tooltips without opening the deck view first."
+                },
+                ["verbose_hand_stats"] = new Dictionary<string, object?>
+                {
+                    ["tool"] = "set_spirelens_view_stats_enabled",
+                    ["argument"] = "verbose_hand_stats",
+                    ["default_enabled_for_validation"] = true,
+                    ["notes"] = "Allows in-hand card-stat tooltips to render the full stats body for screenshot evidence. Normal player config defaults this off."
+                }
+            },
+            ["card_surfaces"] = new List<Dictionary<string, object?>>
+            {
+                BuildValidationSurface("hand", "current combat hand", false, true, true),
+                BuildValidationSurface("deck", "full run deck view", true, true, true),
+                BuildValidationSurface("draw_pile", "current combat draw pile", true, true, true),
+                BuildValidationSurface("discard_pile", "current combat discard pile", true, true, true),
+                BuildValidationSurface("exhaust_pile", "current combat exhaust pile", true, true, true),
+                BuildValidationSurface("card_select", "active card selection grid", false, true, true),
+                BuildValidationSurface("card_reward", "active card reward choices", false, true, true)
+            },
+            ["recommended_tooltip_evidence_flow"] = new[]
+            {
+                "set_spirelens_view_stats_enabled(enabled=true, verbose_hand_stats=true)",
+                "open_card_pile(pile) when the target is in deck/draw_pile/discard_pile/exhaust_pile",
+                "list_visible_cards(surface)",
+                "show_card_tooltip(surface, card_id=target_id)",
+                "capture_screenshot",
+                "close_card_pile() when a pile view was opened"
+            },
+            ["screenshot_contract"] = new Dictionary<string, object?>
+            {
+                ["tool"] = "capture_screenshot",
+                ["canonical_view"] = "full STS2 game window/client area",
+                ["target_visible_required_for_ui_issues"] = true,
+                ["text_visible_required_when_issue_claims_tooltip_text"] = true
+            },
+            ["scenario_setup"] = new Dictionary<string, object?>
+            {
+                ["preferred_card_availability"] = "Materialize a deterministic scenario save with a small deck of real card ids.",
+                ["base_saves"] = new[] { "base_ironclad", "base_silent", "base_defect", "base_regent", "base_necrobinder" },
+                ["normal_encounter_default"] = "FUZZY_WURM_CRAWLER_WEAK"
+            }
+        };
+
+    private static Dictionary<string, object?> BuildValidationSurface(
+        string name,
+        string description,
+        bool requiresOpenCardPile,
+        bool supportsListVisibleCards,
+        bool supportsShowCardTooltip)
+        => new()
+        {
+            ["name"] = name,
+            ["description"] = description,
+            ["requires_open_card_pile"] = requiresOpenCardPile,
+            ["open_card_pile_argument"] = requiresOpenCardPile ? name : null,
+            ["supports_list_visible_cards"] = supportsListVisibleCards,
+            ["supports_show_card_tooltip"] = supportsShowCardTooltip,
+            ["supports_card_id_lookup"] = supportsShowCardTooltip
         };
 
     private static Dictionary<string, object?> ExecuteCatalogLookupCharacter(Dictionary<string, JsonElement> data)
