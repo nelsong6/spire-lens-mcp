@@ -52,6 +52,9 @@ public static partial class McpMod
         "win",
         "instant"
     };
+    private static volatile bool _currentRunLoadInProgress;
+    private static string? _currentRunLoadError;
+    private static DateTime _currentRunLoadStartedAtUtc;
 
     private static bool IsDevAction(string action) => action.StartsWith("dev_", StringComparison.Ordinal);
 
@@ -274,6 +277,8 @@ public static partial class McpMod
     {
         if (NGame.Instance == null)
             return Error("NGame.Instance is not available yet.");
+        if (_currentRunLoadInProgress)
+            return Error("A current run save load is already in progress. Poll get_game_state until state_type is not loading.");
         if (RunManager.Instance.IsInProgress)
             return Error("A run is already in progress. Return to main menu before loading a current run save.");
 
@@ -285,22 +290,45 @@ public static partial class McpMod
         {
             var save = loaded.SaveData;
             var runState = RunState.FromSerializable(save);
-            TaskHelper.RunSafely(LoadCurrentRunSaveAsync(runState, save));
+            _currentRunLoadError = null;
+            _currentRunLoadStartedAtUtc = DateTime.UtcNow;
+            _currentRunLoadInProgress = true;
+            TaskHelper.RunSafely(TrackCurrentRunLoadAsync(runState, save));
         }
         catch (Exception ex)
         {
-            return Error($"Load current run failed: {ex.GetBaseException().Message}");
+            _currentRunLoadInProgress = false;
+            _currentRunLoadError = ex.GetBaseException().Message;
+            return Error($"Load current run failed: {_currentRunLoadError}");
         }
 
         return new Dictionary<string, object?>
         {
             ["status"] = "ok",
-            ["message"] = "Requested loading current_run.save using the game's saved-run path.",
+            ["message"] = "Started loading current_run.save using the game's saved-run path.",
+            ["load_in_progress"] = true,
+            ["load_started_at_utc"] = _currentRunLoadStartedAtUtc.ToString("o"),
             ["schema_version"] = loaded.SaveData.SchemaVersion,
             ["ascension"] = loaded.SaveData.Ascension,
             ["current_act_index"] = loaded.SaveData.CurrentActIndex,
-            ["next_step"] = "Poll get_game_state until the run leaves the menu."
+            ["next_step"] = "Poll get_game_state until state_type is not loading, menu, or unknown."
         };
+    }
+
+    private static async Task TrackCurrentRunLoadAsync(RunState runState, SerializableRun save)
+    {
+        try
+        {
+            await LoadCurrentRunSaveAsync(runState, save);
+        }
+        catch (Exception ex)
+        {
+            _currentRunLoadError = ex.GetBaseException().Message;
+        }
+        finally
+        {
+            _currentRunLoadInProgress = false;
+        }
     }
 
     private static async Task LoadCurrentRunSaveAsync(RunState runState, SerializableRun save)
