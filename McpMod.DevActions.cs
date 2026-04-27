@@ -22,14 +22,17 @@ using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Relics;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Saves.Runs;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic;
 
 namespace SpireLens.Mcp;
 
@@ -78,6 +81,8 @@ public static partial class McpMod
             "dev_close_card_pile" => ExecuteDevCloseCardPile(),
             "dev_list_visible_cards" => ExecuteDevListVisibleCards(data),
             "dev_show_card_tooltip" => ExecuteDevShowCardTooltip(data),
+            "dev_list_visible_relics" => ExecuteDevListVisibleRelics(data),
+            "dev_show_relic_tooltip" => ExecuteDevShowRelicTooltip(data),
             _ => Error($"Unknown dev action: {action}")
         };
 
@@ -196,6 +201,60 @@ public static partial class McpMod
             ["surface"] = surface,
             ["count"] = holders.Count,
             ["cards"] = BuildVisibleCardList(holders)
+        };
+    }
+
+    private static Dictionary<string, object?> ExecuteDevShowRelicTooltip(Dictionary<string, JsonElement> data)
+    {
+        string surface = GetString(data, "surface", "player_relic_bar").ToLowerInvariant();
+        int index = GetInt(data, "relic_index", 0);
+        string relicId = GetString(data, "relic_id", "");
+        string relicNameQuery = GetString(data, "relic_name", "");
+
+        if (!TryResolveRelicHolder(surface, index, relicId, relicNameQuery, out var holder, out var holders, out var resolvedIndex, out var error))
+            return Error(error);
+
+        var relicModel = GetRelicHolderModel(holder!);
+        var relicName = SafeGetText(() => GetCatalogMemberValue(relicModel, "Title")) ?? "unknown";
+        try
+        {
+            ClearVisibleRelicHoverTips(holders);
+            InvokeRelicHolderFocus(holder!);
+        }
+        catch (TargetInvocationException ex)
+        {
+            var inner = ex.InnerException?.GetBaseException() ?? ex.GetBaseException();
+            return Error($"Relic holder tooltip invocation failed for {surface}[{resolvedIndex}] {relicName}: {inner.GetType().Name}: {inner.Message}");
+        }
+        catch (Exception ex)
+        {
+            return Error($"Relic holder tooltip invocation failed for {surface}[{resolvedIndex}] {relicName}: {ex.GetBaseException().Message}");
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = $"Showing hover tooltip for {surface}[{resolvedIndex}]: {relicName}.",
+            ["surface"] = surface,
+            ["relic_index"] = resolvedIndex,
+            ["relic_id"] = GetCatalogEntryId(relicModel),
+            ["relic_name"] = relicName,
+            ["visible_relics"] = BuildVisibleRelicList(holders)
+        };
+    }
+
+    private static Dictionary<string, object?> ExecuteDevListVisibleRelics(Dictionary<string, JsonElement> data)
+    {
+        string surface = GetString(data, "surface", "player_relic_bar").ToLowerInvariant();
+        if (!TryResolveRelicHolders(surface, out var holders, out var error))
+            return Error(error);
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["surface"] = surface,
+            ["count"] = holders.Count,
+            ["relics"] = BuildVisibleRelicList(holders)
         };
     }
 
@@ -1193,6 +1252,197 @@ public static partial class McpMod
         }
     }
 
+    private static bool TryResolveRelicHolder(
+        string surface,
+        int index,
+        string relicId,
+        string relicName,
+        out Control? holder,
+        out IReadOnlyList<Control> holders,
+        out int resolvedIndex,
+        out string error)
+    {
+        holder = null;
+        holders = Array.Empty<Control>();
+        resolvedIndex = index;
+        error = "";
+
+        if (!TryResolveRelicHolders(surface, out holders, out error))
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(relicId) || !string.IsNullOrWhiteSpace(relicName))
+        {
+            var matches = holders
+                .Select((candidate, i) => new { Holder = candidate, Index = i })
+                .Where(item => RelicHolderMatches(item.Holder, relicId, relicName))
+                .ToList();
+            if (matches.Count == 0)
+            {
+                error = $"No {surface} relic matched relic_id '{relicId}' or relic_name '{relicName}'. Available relics: {FormatRelicHolderList(holders)}.";
+                return false;
+            }
+            if (matches.Count > 1)
+            {
+                var indexedMatch = matches.FirstOrDefault(m => m.Index == index);
+                if (indexedMatch != null)
+                {
+                    holder = indexedMatch.Holder;
+                    resolvedIndex = indexedMatch.Index;
+                    return true;
+                }
+
+                error = $"Multiple {surface} relics matched relic_id '{relicId}' or relic_name '{relicName}'. Matching indices: {string.Join(", ", matches.Select(m => m.Index))}. Use relic_index to disambiguate.";
+                return false;
+            }
+
+            holder = matches[0].Holder;
+            resolvedIndex = matches[0].Index;
+            return true;
+        }
+
+        if (index < 0 || index >= holders.Count)
+        {
+            error = $"relic_index {index} out of range for {surface} ({holders.Count} relics available).";
+            return false;
+        }
+
+        holder = holders[index];
+        return true;
+    }
+
+    private static bool TryResolveRelicHolders(
+        string surface,
+        out IReadOnlyList<Control> holders,
+        out string error)
+    {
+        surface = NormalizeRelicSurface(surface);
+        holders = Array.Empty<Control>();
+        error = "";
+
+        switch (surface)
+        {
+            case "player_relic_bar":
+            case "relic_bar":
+            case "inventory":
+                var root = NGame.Instance?.GetTree()?.Root;
+                if (root == null)
+                {
+                    error = "Game root is not available.";
+                    return false;
+                }
+                holders = FindAllSortedByPosition<NRelicInventoryHolder>(root)
+                    .Where(h => GodotObject.IsInstanceValid(h) && h.IsVisibleInTree() && GetRelicHolderModel(h) != null)
+                    .Cast<Control>()
+                    .ToList();
+                return true;
+
+            case "relic_select":
+                var selectOverlay = NOverlayStack.Instance?.Peek();
+                if (selectOverlay is not NChooseARelicSelection relicSelection)
+                {
+                    error = "Relic selection screen is not open.";
+                    return false;
+                }
+                holders = FindAllSortedByPosition<NRelicBasicHolder>(relicSelection)
+                    .Where(h => GodotObject.IsInstanceValid(h) && h.IsVisibleInTree() && GetRelicHolderModel(h) != null)
+                    .Cast<Control>()
+                    .ToList();
+                return true;
+
+            case "treasure":
+                var treasureUI = FindFirst<NTreasureRoom>(((Godot.SceneTree)Godot.Engine.GetMainLoop()).Root);
+                if (treasureUI == null)
+                {
+                    error = "Treasure room is not open.";
+                    return false;
+                }
+
+                var relicCollection = treasureUI.GetNodeOrNull<NTreasureRoomRelicCollection>("%RelicCollection");
+                if (relicCollection?.Visible != true)
+                {
+                    error = "Relic collection is not visible - chest may not be opened yet.";
+                    return false;
+                }
+
+                holders = FindAllSortedByPosition<NTreasureRoomRelicHolder>(relicCollection)
+                    .Where(h => GodotObject.IsInstanceValid(h) && h.IsVisibleInTree() && h.IsEnabled && GetRelicHolderModel(h) != null)
+                    .Cast<Control>()
+                    .ToList();
+                return true;
+
+            default:
+                error = $"Unknown relic surface '{surface}'. Expected player_relic_bar, relic_select, or treasure.";
+                return false;
+        }
+    }
+
+    private static string NormalizeRelicSurface(string value)
+        => value.Trim().ToLowerInvariant().Replace("-", "_").Replace(" ", "_");
+
+    private static bool RelicHolderMatches(Control holder, string relicId, string relicName)
+    {
+        var model = GetRelicHolderModel(holder);
+        if (model == null)
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(relicId))
+        {
+            var query = NormalizeRelicLookupValue(relicId);
+            var id = NormalizeRelicLookupValue(GetCatalogEntryId(model) ?? "");
+            if (id.Equals(query, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(relicName))
+        {
+            var query = NormalizeRelicLookupValue(relicName);
+            var title = NormalizeRelicLookupValue(SafeGetText(() => GetCatalogMemberValue(model, "Title")) ?? "");
+            if (title.Equals(query, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static string NormalizeRelicLookupValue(string value)
+    {
+        var normalized = value.Trim();
+        if (normalized.StartsWith("RELIC.", StringComparison.OrdinalIgnoreCase))
+            normalized = normalized["RELIC.".Length..];
+        return normalized.Replace(" ", "_").Replace("-", "_");
+    }
+
+    private static object? GetRelicHolderModel(Control holder)
+    {
+        var relic = GetCatalogMemberValue(holder, "Relic");
+        return GetCatalogMemberValue(relic, "Model");
+    }
+
+    private static void InvokeRelicHolderFocus(Control holder)
+    {
+        var onFocus = holder.GetType().GetMethod("OnFocus", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (onFocus == null)
+            throw new MissingMethodException(holder.GetType().FullName, "OnFocus");
+
+        onFocus.Invoke(holder, null);
+    }
+
+    private static void ClearVisibleRelicHoverTips(IEnumerable<Control> holders)
+    {
+        foreach (var candidate in holders)
+        {
+            if (!GodotObject.IsInstanceValid(candidate))
+                continue;
+
+            var onUnfocus = candidate.GetType().GetMethod("OnUnfocus", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (onUnfocus == null)
+                continue;
+
+            try { onUnfocus.Invoke(candidate, null); }
+            catch { }
+        }
+    }
+
     private static string NormalizeCardPileSurface(string value)
     {
         var normalized = value.Trim().ToLowerInvariant().Replace("-", "_").Replace(" ", "_");
@@ -1274,6 +1524,13 @@ public static partial class McpMod
         => string.Join(", ", holders.Select((h, i) =>
             $"{i}:{h.CardModel?.Id.Entry ?? "unknown"}:{SafeGetText(() => h.CardModel?.Title) ?? "unknown"}"));
 
+    private static string FormatRelicHolderList(IReadOnlyList<Control> holders)
+        => string.Join(", ", holders.Select((h, i) =>
+        {
+            var model = GetRelicHolderModel(h);
+            return $"{i}:{GetCatalogEntryId(model) ?? "unknown"}:{SafeGetText(() => GetCatalogMemberValue(model, "Title")) ?? "unknown"}";
+        }));
+
     private static List<Dictionary<string, object?>> BuildVisibleCardList(IReadOnlyList<NCardHolder> holders)
         => holders.Select((h, i) => new Dictionary<string, object?>
         {
@@ -1285,6 +1542,24 @@ public static partial class McpMod
                 ["x"] = h.GlobalPosition.X,
                 ["y"] = h.GlobalPosition.Y
             }
+        }).ToList();
+
+    private static List<Dictionary<string, object?>> BuildVisibleRelicList(IReadOnlyList<Control> holders)
+        => holders.Select((h, i) =>
+        {
+            var model = GetRelicHolderModel(h);
+            return new Dictionary<string, object?>
+            {
+                ["index"] = i,
+                ["relic_id"] = GetCatalogEntryId(model),
+                ["relic_name"] = SafeGetText(() => GetCatalogMemberValue(model, "Title")) ?? "unknown",
+                ["relic_description"] = SafeGetText(() => GetCatalogMemberValue(model, "DynamicDescription")),
+                ["global_position"] = new Dictionary<string, object?>
+                {
+                    ["x"] = h.GlobalPosition.X,
+                    ["y"] = h.GlobalPosition.Y
+                }
+            };
         }).ToList();
 
     private static IReadOnlyList<string> GetStringArray(Dictionary<string, JsonElement> data, string key)

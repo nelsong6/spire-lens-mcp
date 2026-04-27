@@ -876,6 +876,61 @@ async def show_card_tooltip(
 
 
 @mcp.tool()
+async def list_visible_relics(surface: str = "player_relic_bar") -> str:
+    """List visible relics on a UI surface without changing hover state.
+
+    Use this before `show_relic_tooltip` to discover stable relic ids and
+    visible indices. Supported surfaces:
+    - `player_relic_bar`: owned relics visible in the run UI
+    - `relic_select`: active choose-a-relic overlay
+    - `treasure`: active treasure room relic rewards
+    """
+    try:
+        return await _post({
+            "action": "dev_list_visible_relics",
+            "surface": surface,
+        })
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def show_relic_tooltip(
+    surface: str = "player_relic_bar",
+    relic_index: int = 0,
+    relic_id: str | None = None,
+    relic_name: str | None = None,
+) -> str:
+    """Force the game to show hover tooltips for a visible relic holder.
+
+    Use this immediately before `capture_screenshot` when validating
+    relic-facing tooltip or text behavior.
+
+    Args:
+        surface: Visible UI surface containing the target relic.
+        relic_index: 0-based relic index on that surface. When relic_id or
+            relic_name matches multiple visible relics, relic_index
+            disambiguates.
+        relic_id: Optional relic id such as PEN_NIB. Prefer this over an index
+            when a specific visible relic matters.
+        relic_name: Optional display name such as Pen Nib.
+    """
+    body: dict = {
+        "action": "dev_show_relic_tooltip",
+        "surface": surface,
+        "relic_index": relic_index,
+    }
+    if relic_id:
+        body["relic_id"] = relic_id
+    if relic_name:
+        body["relic_name"] = relic_name
+    try:
+        return await _post(body)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
 async def open_card_pile(pile: str = "deck") -> str:
     """Open a real in-game card pile view for visual inspection and screenshots.
 
