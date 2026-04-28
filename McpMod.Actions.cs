@@ -1033,7 +1033,7 @@ public static partial class McpMod
         };
     }
 
-    private static Creature? ResolveTarget(CombatState combatState, string entityId)
+    private static Creature? ResolveTarget(ICombatState combatState, string entityId)
     {
         // Try to match by entity_id pattern: "model_entry_N"
         // First try matching by combat_id if it's a pure number

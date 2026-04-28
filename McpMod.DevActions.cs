@@ -594,7 +594,7 @@ public static partial class McpMod
         if (NGame.Instance == null)
             throw new InvalidOperationException("NGame.Instance is not available.");
 
-        RunManager.Instance.SetUpSavedSinglePlayer(runState, save);
+        await RunManager.Instance.SetUpSavedSinglePlayer(runState, save);
         NGame.Instance.ReactionContainer.InitializeNetworking(new NetSingleplayerGameService());
         await NGame.Instance.LoadRun(runState, save.PreFinishedRoom);
     }
