@@ -68,6 +68,8 @@ public static partial class McpMod
             "list_cards" => ExecuteCatalogListCards(data),
             "lookup_relic" => ExecuteCatalogLookupRelic(data),
             "list_relics" => ExecuteCatalogListRelics(data),
+            "lookup_encounter" => ExecuteCatalogLookupEncounter(data),
+            "list_encounters" => ExecuteCatalogListEncounters(data),
             "lookup_character" => ExecuteCatalogLookupCharacter(data),
             "list_characters" => BuildCatalogCharactersResult(),
             "get_validation_capabilities" => BuildValidationCapabilities(),
@@ -78,12 +80,14 @@ public static partial class McpMod
     {
         var cards = GetCatalogCards();
         var relics = GetCatalogRelics();
+        var encounters = GetCatalogEncounters();
         var characters = GetCatalogCharacters();
         return new Dictionary<string, object?>
         {
             ["status"] = "ok",
             ["card_count"] = cards.Count,
             ["relic_count"] = relics.Count,
+            ["encounter_count"] = encounters.Count,
             ["character_count"] = characters.Count,
             ["characters"] = characters.Select(BuildCatalogCharacterInfo).ToList()
         };
@@ -213,6 +217,28 @@ public static partial class McpMod
                 outputContract: "JSON with status ok, filters echoed, count, and relics[] containing id/name/rarity/description.",
                 commonFailures: new[] { "overly narrow filter returns too few relics" },
                 examples: new[] { "list_relics(query=\"nib\")", "list_relics(rarity=\"Rare\", limit=20)" }),
+            BuildValidationTool(
+                "lookup_encounter",
+                "catalog",
+                "Resolve an encounter id/name from the live STS2 model catalog for scenario save setup.",
+                mutatesState: false,
+                requiresGameRunning: false,
+                requiresCombat: false,
+                safeForPlanning: true,
+                outputContract: "JSON with status ok|not_found|ambiguous, kind=encounter, match_count, matches[], and encounter when exactly one match exists.",
+                commonFailures: new[] { "query missing", "not_found", "ambiguous" },
+                examples: new[] { "lookup_encounter(query=\"FUZZY_WURM_CRAWLER_WEAK\")" }),
+            BuildValidationTool(
+                "list_encounters",
+                "catalog",
+                "List real encounter ids from the live catalog using room_type/query filters.",
+                mutatesState: false,
+                requiresGameRunning: false,
+                requiresCombat: false,
+                safeForPlanning: true,
+                outputContract: "JSON with status ok, filters echoed, count, and encounters[] containing id/name/room_type/is_weak/is_debug.",
+                commonFailures: new[] { "overly narrow filter returns too few encounters" },
+                examples: new[] { "list_encounters(room_type=\"Monster\", query=\"weak\")" }),
             BuildValidationTool(
                 "lookup_character",
                 "catalog",
@@ -467,6 +493,17 @@ public static partial class McpMod
         return BuildLookupResult("relic", query, matches);
     }
 
+    private static Dictionary<string, object?> ExecuteCatalogLookupEncounter(Dictionary<string, JsonElement> data)
+    {
+        string query = GetString(data, "query", "");
+        if (string.IsNullOrWhiteSpace(query))
+            return Error("Missing 'query'.");
+
+        int maxMatches = Math.Clamp(GetInt(data, "max_matches", 10), 1, 50);
+        var matches = MatchCatalogObjects(GetCatalogEncounters(), query, BuildCatalogEncounterInfo).Take(maxMatches).ToList();
+        return BuildLookupResult("encounter", query, matches);
+    }
+
     private static Dictionary<string, object?> ExecuteCatalogListCards(Dictionary<string, JsonElement> data)
     {
         string owner = GetString(data, "owner", "");
@@ -524,6 +561,33 @@ public static partial class McpMod
         };
     }
 
+    private static Dictionary<string, object?> ExecuteCatalogListEncounters(Dictionary<string, JsonElement> data)
+    {
+        string roomType = GetString(data, "room_type", "");
+        string query = GetString(data, "query", "");
+        int limit = Math.Clamp(GetInt(data, "limit", 50), 1, 300);
+
+        string normalizedRoomType = NormalizeCatalogKey(roomType);
+        string normalizedQuery = NormalizeCatalogKey(query);
+
+        var encounters = GetCatalogEncounters()
+            .Select(BuildCatalogEncounterInfo)
+            .Where(encounter => MatchesCatalogEncounterFilter(encounter, normalizedRoomType, normalizedQuery))
+            .OrderBy(encounter => Convert.ToString(encounter.GetValueOrDefault("name")), StringComparer.OrdinalIgnoreCase)
+            .ThenBy(encounter => Convert.ToString(encounter.GetValueOrDefault("id")), StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToList();
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["room_type"] = string.IsNullOrWhiteSpace(roomType) ? null : roomType,
+            ["query"] = string.IsNullOrWhiteSpace(query) ? null : query,
+            ["count"] = encounters.Count,
+            ["encounters"] = encounters
+        };
+    }
+
     private static bool MatchesCatalogCardFilter(
         Dictionary<string, object?> card,
         string normalizedOwner,
@@ -578,6 +642,23 @@ public static partial class McpMod
 
         string id = NormalizeCatalogKey(Convert.ToString(relic.GetValueOrDefault("id")) ?? "");
         string name = NormalizeCatalogKey(Convert.ToString(relic.GetValueOrDefault("name")) ?? "");
+        return id.Contains(normalizedQuery) || name.Contains(normalizedQuery);
+    }
+
+    private static bool MatchesCatalogEncounterFilter(
+        Dictionary<string, object?> encounter,
+        string normalizedRoomType,
+        string normalizedQuery)
+    {
+        if (!string.IsNullOrWhiteSpace(normalizedRoomType)
+            && NormalizeCatalogKey(Convert.ToString(encounter.GetValueOrDefault("room_type")) ?? "") != normalizedRoomType)
+            return false;
+
+        if (string.IsNullOrWhiteSpace(normalizedQuery))
+            return true;
+
+        string id = NormalizeCatalogKey(Convert.ToString(encounter.GetValueOrDefault("id")) ?? "");
+        string name = NormalizeCatalogKey(Convert.ToString(encounter.GetValueOrDefault("name")) ?? "");
         return id.Contains(normalizedQuery) || name.Contains(normalizedQuery);
     }
 
@@ -668,6 +749,28 @@ public static partial class McpMod
         return DistinctCatalogObjectsById(relics);
     }
 
+    private static List<object> GetCatalogEncounters()
+    {
+        var encounters = new List<object>();
+        encounters.AddRange(GetStaticModelDbSequence("AllEncounters", "Encounters", "EncounterModels").Where(IsCatalogEncounterLike));
+        foreach (var act in GetStaticModelDbSequence("Acts", "AllActs", "ActModels"))
+        {
+            encounters.AddRange(GetCatalogObjectSequence(act, "AllEncounters").Where(IsCatalogEncounterLike));
+            encounters.AddRange(GetCatalogObjectSequence(act, "AllWeakEncounters").Where(IsCatalogEncounterLike));
+            encounters.AddRange(GetCatalogObjectSequence(act, "AllRegularEncounters").Where(IsCatalogEncounterLike));
+            encounters.AddRange(GetCatalogObjectSequence(act, "AllEliteEncounters").Where(IsCatalogEncounterLike));
+            encounters.AddRange(GetCatalogObjectSequence(act, "AllBossEncounters").Where(IsCatalogEncounterLike));
+
+            var boss = GetCatalogMemberValue(act, "BossEncounter");
+            if (boss != null && IsCatalogEncounterLike(boss))
+                encounters.Add(boss);
+            var secondBoss = GetCatalogMemberValue(act, "SecondBossEncounter");
+            if (secondBoss != null && IsCatalogEncounterLike(secondBoss))
+                encounters.Add(secondBoss);
+        }
+        return DistinctCatalogObjectsById(encounters);
+    }
+
     private static Dictionary<string, object?> BuildCatalogCharacterInfo(object character)
     {
         var cardPool = GetCatalogMemberValue(character, "CardPool");
@@ -717,6 +820,16 @@ public static partial class McpMod
                              ?? SafeGetText(() => GetCatalogMemberValue(relic, "Description"))
         };
 
+    private static Dictionary<string, object?> BuildCatalogEncounterInfo(object encounter)
+        => new()
+        {
+            ["id"] = GetCatalogEntryId(encounter),
+            ["name"] = SafeGetText(() => GetCatalogMemberValue(encounter, "Title")),
+            ["room_type"] = GetCatalogMemberValue(encounter, "RoomType")?.ToString(),
+            ["is_weak"] = GetCatalogMemberValue(encounter, "IsWeak"),
+            ["is_debug"] = GetCatalogMemberValue(encounter, "IsDebugEncounter")
+        };
+
     private static List<object> GetCatalogCardOwners(string cardId)
     {
         var owners = new List<object>();
@@ -741,6 +854,17 @@ public static partial class McpMod
                         yield return item;
             }
         }
+    }
+
+    private static IEnumerable<object> GetCatalogObjectSequence(object source, string memberName)
+    {
+        var value = GetCatalogMemberValue(source, memberName);
+        if (value is not IEnumerable enumerable || value is string)
+            yield break;
+
+        foreach (var item in enumerable)
+            if (item != null)
+                yield return item;
     }
 
     private static List<object> ExtractCatalogCards(object? source, int maxDepth)
@@ -793,6 +917,11 @@ public static partial class McpMod
            && GetCatalogMemberValue(obj, "Rarity") != null
            && GetCatalogMemberValue(obj, "Type") == null;
 
+    private static bool IsCatalogEncounterLike(object obj)
+        => GetCatalogEntryId(obj) != null
+           && obj.GetType().Name.Contains("Encounter", StringComparison.OrdinalIgnoreCase)
+           && GetCatalogMemberValue(obj, "RoomType") != null;
+
     private static List<object> DistinctCatalogObjectsById(IEnumerable<object> objects)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -810,7 +939,7 @@ public static partial class McpMod
     {
         if (source == null) return null;
         var type = source as Type ?? source.GetType();
-        var flags = BindingFlags.Public | (isStatic ? BindingFlags.Static : BindingFlags.Instance);
+        var flags = BindingFlags.Public | BindingFlags.NonPublic | (isStatic ? BindingFlags.Static : BindingFlags.Instance);
         try
         {
             var property = type.GetProperty(memberName, flags);

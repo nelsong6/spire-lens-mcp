@@ -196,18 +196,33 @@ public static partial class McpMod
     private static string? GetFullSavePath(object? saveStore, string? savePath)
     {
         if (saveStore == null || string.IsNullOrWhiteSpace(savePath))
-            return savePath;
+            return ResolveGameUserPath(savePath);
 
         try
         {
             var method = saveStore.GetType().GetMethod("GetFullPath", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             var fullPath = method?.Invoke(saveStore, new object[] { savePath });
-            return fullPath as string ?? savePath;
+            return ResolveGameUserPath(fullPath as string ?? savePath);
         }
         catch
         {
-            return savePath;
+            return ResolveGameUserPath(savePath);
         }
+    }
+
+    private static string? ResolveGameUserPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return path;
+        if (!path.StartsWith("user://", StringComparison.OrdinalIgnoreCase))
+            return path;
+
+        string relative = path["user://".Length..]
+            .TrimStart('/', '\\')
+            .Replace('/', Path.DirectorySeparatorChar)
+            .Replace('\\', Path.DirectorySeparatorChar);
+        string appData = System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData);
+        return Path.Combine(appData, "SlayTheSpire2", relative);
     }
 
     private static Dictionary<string, object?> ExecuteDevSetSpireLensViewStatsEnabled(Dictionary<string, JsonElement> data)

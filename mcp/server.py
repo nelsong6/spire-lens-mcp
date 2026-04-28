@@ -145,6 +145,14 @@ def _current_run_save_path() -> Path:
     return _user_data_dir() / "steam" / steam_id / namespace / profile / "saves" / "current_run.save"
 
 
+def _game_path_to_filesystem(path: str) -> Path:
+    value = path.strip()
+    if value.lower().startswith("user://"):
+        relative = value[len("user://") :].replace("\\", "/").lstrip("/")
+        return _user_data_dir() / Path(relative)
+    return Path(value)
+
+
 async def _active_save_context() -> dict | None:
     try:
         data = json.loads(await _post({"action": "dev_get_save_context"}))
@@ -163,7 +171,7 @@ def _current_run_save_path_from_context(context: dict | None) -> Path:
     if context:
         full_path = context.get("current_run_save_full_path") or context.get("current_run_save_path")
         if isinstance(full_path, str) and full_path.strip():
-            return Path(full_path)
+            return _game_path_to_filesystem(full_path)
 
     return _current_run_save_path()
 
@@ -255,6 +263,216 @@ def _normalize_relic_id(relic_id: str) -> str:
 def _normalize_encounter_id(encounter_id: str) -> str:
     value = encounter_id.strip().upper()
     return value if value.startswith("ENCOUNTER.") else f"ENCOUNTER.{value}"
+
+
+def _catalog_query_id(value: str, prefix: str) -> str:
+    stripped = value.strip()
+    normalized_prefix = f"{prefix.upper()}."
+    return stripped[len(normalized_prefix) :] if stripped.upper().startswith(normalized_prefix) else stripped
+
+
+def _normalize_catalog_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _iter_save_strings(value) -> list[str]:
+    result = []
+    if isinstance(value, str):
+        result.append(value)
+    elif isinstance(value, list):
+        for item in value:
+            result.extend(_iter_save_strings(item))
+    elif isinstance(value, dict):
+        for item in value.values():
+            result.extend(_iter_save_strings(item))
+    return result
+
+
+def _known_save_encounter_ids() -> list[str]:
+    ids: set[str] = set()
+    for root in (_base_save_dir(), _scenario_save_dir()):
+        if not root.exists():
+            continue
+        for path in root.glob("*.save"):
+            try:
+                data = _load_save_json(path)
+            except Exception:
+                continue
+            for value in _iter_save_strings(data):
+                text = value.strip().upper()
+                if text.startswith("ENCOUNTER."):
+                    ids.add(text[len("ENCOUNTER.") :])
+    return sorted(ids)
+
+
+def _known_encounter_room_type(encounter_id: str) -> str | None:
+    if encounter_id.endswith("_ELITE"):
+        return "Elite"
+    if encounter_id.endswith("_BOSS"):
+        return "Boss"
+    if encounter_id.endswith("_WEAK") or encounter_id.endswith("_NORMAL"):
+        return "Monster"
+    return None
+
+
+def _known_encounter_info(encounter_id: str) -> dict:
+    return {
+        "id": encounter_id,
+        "name": encounter_id.replace("_", " ").title(),
+        "room_type": _known_encounter_room_type(encounter_id),
+        "is_weak": encounter_id.endswith("_WEAK"),
+        "is_debug": False,
+        "source": "managed_save_ids",
+    }
+
+
+def _filter_known_encounters(
+    room_type: str | None = None,
+    query: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    normalized_room_type = (room_type or "").strip().lower()
+    normalized_query = _normalize_catalog_key(_catalog_query_id(query or "", "ENCOUNTER"))
+    matches = []
+    for encounter_id in _known_save_encounter_ids():
+        info = _known_encounter_info(encounter_id)
+        if normalized_room_type and str(info.get("room_type") or "").lower() != normalized_room_type:
+            continue
+        haystacks = [
+            _normalize_catalog_key(str(info.get("id") or "")),
+            _normalize_catalog_key(str(info.get("name") or "")),
+        ]
+        if normalized_query and not any(normalized_query in haystack for haystack in haystacks):
+            continue
+        matches.append(info)
+    return matches[: max(1, min(limit, 300))]
+
+
+def _lookup_result(kind: str, query: str, matches: list[dict]) -> dict:
+    status = "ok" if len(matches) == 1 else "not_found" if len(matches) == 0 else "ambiguous"
+    result = {
+        "status": status,
+        "kind": kind,
+        "query": query,
+        "match_count": len(matches),
+        "matches": matches,
+    }
+    if len(matches) == 1:
+        result[kind] = matches[0]
+    elif len(matches) == 0:
+        result["error"] = f"No {kind} matched '{query}'."
+    else:
+        result["error"] = f"{len(matches)} {kind}s matched '{query}'. The issue is ambiguous."
+    return result
+
+
+async def _lookup_encounter_data(query: str, max_matches: int = 10) -> dict:
+    try:
+        data = json.loads(await _catalog_post({"action": "lookup_encounter", "query": query, "max_matches": max_matches}))
+        if data.get("status") in ("ok", "ambiguous"):
+            return data
+    except Exception:
+        data = None
+
+    matches = _filter_known_encounters(query=query, limit=max_matches)
+    return _lookup_result("encounter", query, matches)
+
+
+async def _list_encounters_data(
+    room_type: str | None = None,
+    query: str | None = None,
+    limit: int = 50,
+) -> dict:
+    try:
+        data = json.loads(await _catalog_post({
+            "action": "list_encounters",
+            "room_type": room_type or "",
+            "query": query or "",
+            "limit": limit,
+        }))
+        if int(data.get("count") or 0) > 0:
+            return data
+    except Exception:
+        pass
+
+    encounters = _filter_known_encounters(room_type=room_type, query=query, limit=limit)
+    return {
+        "status": "ok",
+        "room_type": room_type,
+        "query": query,
+        "count": len(encounters),
+        "encounters": encounters,
+    }
+
+
+async def _lookup_catalog_unique(action: str, kind: str, query: str, prefix: str | None = None) -> dict:
+    lookup_query = _catalog_query_id(query, prefix) if prefix else query.strip()
+    if action == "lookup_encounter":
+        data = await _lookup_encounter_data(lookup_query, 10)
+    else:
+        data = json.loads(await _catalog_post({"action": action, "query": lookup_query, "max_matches": 10}))
+    status = data.get("status")
+    if status != "ok":
+        error = data.get("error") or f"status={status}"
+        raise ValueError(f"Invalid {kind} id {query!r}: {error}")
+    item = data.get(kind)
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
+        raise ValueError(f"Catalog lookup for {kind} {query!r} did not return a usable id.")
+    if prefix is not None and item["id"].strip().upper() != lookup_query.strip().upper():
+        raise ValueError(
+            f"Invalid {kind} id {query!r}: nearest catalog match is {item['id']!r}, "
+            "but scenario saves require exact catalog ids."
+        )
+    return item
+
+
+async def _validate_scenario_ids(
+    deck: list[str] | None,
+    add_cards: list[str] | None,
+    remove_cards: list[str] | None,
+    relics: list[str] | None,
+    add_relics: list[str] | None,
+    remove_relics: list[str] | None,
+    next_normal_encounter: str | None,
+) -> dict:
+    async def validate_many(values: list[str] | None, action: str, kind: str, prefix: str) -> list[dict]:
+        result = []
+        for value in values or []:
+            item = await _lookup_catalog_unique(action, kind, value, prefix)
+            result.append({
+                "input": value,
+                "id": item["id"],
+                "name": item.get("name"),
+            })
+        return result
+
+    validation = {
+        "status": "ok",
+        "cards": {
+            "deck": await validate_many(deck, "lookup_card", "card", "CARD"),
+            "add_cards": await validate_many(add_cards, "lookup_card", "card", "CARD"),
+            "remove_cards": await validate_many(remove_cards, "lookup_card", "card", "CARD"),
+        },
+        "relics": {
+            "relics": await validate_many(relics, "lookup_relic", "relic", "RELIC"),
+            "add_relics": await validate_many(add_relics, "lookup_relic", "relic", "RELIC"),
+            "remove_relics": await validate_many(remove_relics, "lookup_relic", "relic", "RELIC"),
+        },
+        "encounter": None,
+    }
+    if next_normal_encounter is not None:
+        encounter = await _lookup_catalog_unique("lookup_encounter", "encounter", next_normal_encounter, "ENCOUNTER")
+        validation["encounter"] = {
+            "input": next_normal_encounter,
+            "id": encounter["id"],
+            "name": encounter.get("name"),
+            "room_type": encounter.get("room_type"),
+        }
+    return validation
+
+
+def _resolved_ids(items: list[dict]) -> list[str]:
+    return [str(item["id"]) for item in items]
 
 
 def _card_entry(card_id: str, floor_added_to_deck: int = 1) -> dict:
@@ -405,6 +623,33 @@ async def list_relics(
 
 
 @mcp.tool()
+async def lookup_encounter(query: str, max_matches: int = 10) -> str:
+    """Look up encounter identity for scenario save setup.
+
+    Uses the live STS2 model catalog when available and falls back to managed
+    base/scenario save encounter ids. Use this instead of model memory whenever
+    a scenario needs a specific encounter id.
+    """
+    try:
+        return json.dumps(await _lookup_encounter_data(query, max_matches), indent=2)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def list_encounters(
+    room_type: str | None = None,
+    query: str | None = None,
+    limit: int = 50,
+) -> str:
+    """List known encounter ids for scenario save setup with optional filters."""
+    try:
+        return json.dumps(await _list_encounters_data(room_type=room_type, query=query, limit=limit), indent=2)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
 async def lookup_character(query: str) -> str:
     """Look up character identity from the live STS2 model catalog.
 
@@ -535,6 +780,7 @@ async def materialize_scenario_save(
     max_hp: int | None = None,
     max_energy: int | None = None,
     next_normal_encounter: str | None = None,
+    validate_ids: bool = True,
 ) -> str:
     """Create a derived scenario save by editing stable JSON save fields.
 
@@ -557,12 +803,37 @@ async def materialize_scenario_save(
         max_energy: Optional exact max energy.
         next_normal_encounter: Optional encounter id to place at the next normal
             encounter slot, e.g. FUZZY_WURM_CRAWLER_WEAK.
+        validate_ids: When true, resolve every supplied card/relic/encounter id
+            against the live STS2 catalog before writing the save. This is the
+            default because invalid ids can deserialize as Deprecated Card
+            placeholders and poison screenshot evidence.
     """
     try:
         base_path = _named_save_path(_base_save_dir(), base_name)
         output_path = _named_save_path(_scenario_save_dir(), scenario_name)
         data = _load_save_json(base_path)
         edited = copy.deepcopy(data)
+        id_validation = None
+        if validate_ids:
+            id_validation = await _validate_scenario_ids(
+                deck,
+                add_cards,
+                remove_cards,
+                relics,
+                add_relics,
+                remove_relics,
+                next_normal_encounter,
+            )
+            if deck is not None:
+                deck = _resolved_ids(id_validation["cards"]["deck"])
+            add_cards = _resolved_ids(id_validation["cards"]["add_cards"])
+            remove_cards = _resolved_ids(id_validation["cards"]["remove_cards"])
+            if relics is not None:
+                relics = _resolved_ids(id_validation["relics"]["relics"])
+            add_relics = _resolved_ids(id_validation["relics"]["add_relics"])
+            remove_relics = _resolved_ids(id_validation["relics"]["remove_relics"])
+            if id_validation["encounter"] is not None:
+                next_normal_encounter = id_validation["encounter"]["id"]
 
         players = edited.get("players")
         if not isinstance(players, list) or not players or not isinstance(players[0], dict):
@@ -633,6 +904,7 @@ async def materialize_scenario_save(
             "scenario_name": _safe_save_name(scenario_name),
             "bytes": output_path.stat().st_size,
             "sha256": _sha256(output_path),
+            "id_validation": id_validation,
             "before": _save_summary(data),
             "after": _save_summary(edited),
             "next_step": "Load this scenario save in-game and verify with get_game_state before using it in an agent test.",
