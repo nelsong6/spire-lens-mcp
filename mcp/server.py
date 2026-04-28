@@ -139,30 +139,47 @@ def _current_run_save_path() -> Path:
     configured = os.environ.get("STS2_CURRENT_RUN_SAVE")
     if configured and configured.strip():
         return Path(configured)
-    candidates = sorted(
-        _user_data_dir().glob("steam/*/modded/profile1/saves/current_run.save"),
-        key=lambda p: p.stat().st_mtime if p.exists() else 0,
-        reverse=True,
-    )
-    if candidates:
-        return candidates[0]
-    return _user_data_dir() / "steam" / "76561198062015438" / "modded" / "profile1" / "saves" / "current_run.save"
+    steam_id = os.environ.get("STS2_STEAM_ID", "76561198062015438").strip()
+    profile = os.environ.get("STS2_PROFILE", "profile1").strip()
+    namespace = os.environ.get("STS2_SAVE_NAMESPACE", "modded").strip()
+    return _user_data_dir() / "steam" / steam_id / namespace / profile / "saves" / "current_run.save"
 
 
-def _steam_remote_current_run_save_path() -> Path | None:
+async def _active_save_context() -> dict | None:
+    try:
+        data = json.loads(await _post({"action": "dev_get_save_context"}))
+    except Exception:
+        return None
+    if data.get("status") == "error":
+        return None
+    return data
+
+
+def _current_run_save_path_from_context(context: dict | None) -> Path:
+    configured = os.environ.get("STS2_CURRENT_RUN_SAVE")
+    if configured and configured.strip():
+        return Path(configured)
+
+    if context:
+        full_path = context.get("current_run_save_full_path") or context.get("current_run_save_path")
+        if isinstance(full_path, str) and full_path.strip():
+            return Path(full_path)
+
+    return _current_run_save_path()
+
+
+def _steam_remote_current_run_save_path(appdata_current: Path | None = None) -> Path | None:
     configured = os.environ.get("STS2_STEAM_REMOTE_CURRENT_RUN_SAVE")
     if configured and configured.strip():
         return Path(configured)
 
-    appdata_current = _current_run_save_path()
-    marker = ("modded", "profile1", "saves", "current_run.save")
+    appdata_current = appdata_current or _current_run_save_path()
     parts = appdata_current.parts
-    suffix_start = None
-    for i in range(0, len(parts) - len(marker) + 1):
-        if tuple(parts[i : i + len(marker)]) == marker:
-            suffix_start = i
+    suffix = Path("modded", "profile1", "saves", "current_run.save")
+    for i in range(0, len(parts) - 2):
+        if parts[i].lower() == "steam":
+            suffix = Path(*parts[i + 2 :])
             break
-    suffix = Path(*parts[suffix_start:]) if suffix_start is not None else Path(*marker)
 
     candidates: list[Path] = []
     for root in [
@@ -179,9 +196,10 @@ def _steam_remote_current_run_save_path() -> Path | None:
     return candidates[0] if candidates else None
 
 
-def _current_run_save_targets() -> list[Path]:
-    targets = [_current_run_save_path()]
-    remote = _steam_remote_current_run_save_path()
+def _current_run_save_targets(context: dict | None = None) -> list[Path]:
+    appdata_current = _current_run_save_path_from_context(context)
+    targets = [appdata_current]
+    remote = _steam_remote_current_run_save_path(appdata_current)
     if remote and remote not in targets:
         targets.append(remote)
     return targets
@@ -643,8 +661,9 @@ async def install_save_as_current(name: str, kind: str = "scenario") -> str:
             raise FileNotFoundError(source)
 
         bytes_to_install = source.read_bytes()
+        save_context = await _active_save_context()
         installed = []
-        for current in _current_run_save_targets():
+        for current in _current_run_save_targets(save_context):
             current.parent.mkdir(parents=True, exist_ok=True)
             companion = current.with_name(f"{current.name}.backup")
             backup = None
@@ -666,9 +685,24 @@ async def install_save_as_current(name: str, kind: str = "scenario") -> str:
             "installed": str(source),
             "targets": installed,
             "target_count": len(installed),
+            "save_context": save_context,
             "sha256": _sha256(source),
             "next_step": "Launch STS2 after installing, then load the run and inspect get_game_state.",
         }, indent=2)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def get_save_context() -> str:
+    """Return STS2's active current-run save context from the in-game bridge.
+
+    This is the authoritative save target for scenario install/load flows. It
+    asks the running game where `SaveManager.LoadRunSave()` will read from,
+    including the active profile id and the full current_run.save path.
+    """
+    try:
+        return await _post({"action": "dev_get_save_context"})
     except Exception as e:
         return _handle_error(e)
 

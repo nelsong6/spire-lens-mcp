@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
@@ -70,6 +71,7 @@ public static partial class McpMod
             "dev_start_singleplayer_run" => ExecuteDevStartSingleplayerRun(data),
             "dev_list_scenario_commands" => ExecuteDevListScenarioCommands(),
             "dev_run_scenario_command" => ExecuteDevRunScenarioCommand(data),
+            "dev_get_save_context" => ExecuteDevGetSaveContext(),
             "dev_validate_current_run_save" => ExecuteDevValidateCurrentRunSave(),
             "dev_load_current_run_save" => ExecuteDevLoadCurrentRunSave(),
             "dev_configure_run_deck" => ExecuteDevConfigureRunDeck(data),
@@ -112,6 +114,100 @@ public static partial class McpMod
             ["message"] = "Requested SpireLens Core hot reload.",
             ["reload_number"] = reloadNumber
         };
+    }
+
+    private static Dictionary<string, object?> ExecuteDevGetSaveContext()
+    {
+        var saveManager = SaveManager.Instance;
+        if (saveManager == null)
+            return Error("SaveManager.Instance is not available.");
+
+        var runSaveManager = GetPrivateFieldValue(saveManager, "_runSaveManager");
+        var saveStore = GetPrivateFieldValue(saveManager, "_saveStore")
+            ?? (runSaveManager == null ? null : GetPrivateFieldValue(runSaveManager, "_saveStore"));
+
+        string? currentRunSavePath = GetStringPropertyValue(runSaveManager, "CurrentRunSavePath");
+        string? currentMultiplayerRunSavePath = GetStringPropertyValue(runSaveManager, "CurrentMultiplayerRunSavePath");
+        string? currentRunSaveFullPath = GetFullSavePath(saveStore, currentRunSavePath);
+        string? currentMultiplayerRunSaveFullPath = GetFullSavePath(saveStore, currentMultiplayerRunSavePath);
+
+        int? currentProfileId = null;
+        try
+        {
+            if (saveManager.IsProfileInitialized)
+                currentProfileId = saveManager.CurrentProfileId;
+        }
+        catch
+        {
+            currentProfileId = null;
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["profile_initialized"] = SafeValue(() => saveManager.IsProfileInitialized),
+            ["current_profile_id"] = currentProfileId,
+            ["has_run_save"] = SafeValue(() => saveManager.HasRunSave),
+            ["has_multiplayer_run_save"] = SafeValue(() => saveManager.HasMultiplayerRunSave),
+            ["current_run_save_path"] = currentRunSavePath,
+            ["current_run_save_full_path"] = currentRunSaveFullPath,
+            ["current_run_save_exists"] = currentRunSaveFullPath == null ? null : File.Exists(currentRunSaveFullPath),
+            ["current_multiplayer_run_save_path"] = currentMultiplayerRunSavePath,
+            ["current_multiplayer_run_save_full_path"] = currentMultiplayerRunSaveFullPath,
+            ["current_multiplayer_run_save_exists"] = currentMultiplayerRunSaveFullPath == null ? null : File.Exists(currentMultiplayerRunSaveFullPath),
+            ["save_store_type"] = saveStore?.GetType().FullName,
+            ["run_save_manager_type"] = runSaveManager?.GetType().FullName,
+            ["source"] = "SaveManager.Instance._runSaveManager.CurrentRunSavePath via ISaveStore.GetFullPath"
+        };
+    }
+
+    private static object? SafeValue<T>(Func<T> getter)
+    {
+        try
+        {
+            return getter();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static object? GetPrivateFieldValue(object? instance, string fieldName)
+    {
+        if (instance == null)
+            return null;
+
+        return instance.GetType()
+            .GetField(fieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            ?.GetValue(instance);
+    }
+
+    private static string? GetStringPropertyValue(object? instance, string propertyName)
+    {
+        if (instance == null)
+            return null;
+
+        return instance.GetType()
+            .GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            ?.GetValue(instance) as string;
+    }
+
+    private static string? GetFullSavePath(object? saveStore, string? savePath)
+    {
+        if (saveStore == null || string.IsNullOrWhiteSpace(savePath))
+            return savePath;
+
+        try
+        {
+            var method = saveStore.GetType().GetMethod("GetFullPath", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var fullPath = method?.Invoke(saveStore, new object[] { savePath });
+            return fullPath as string ?? savePath;
+        }
+        catch
+        {
+            return savePath;
+        }
     }
 
     private static Dictionary<string, object?> ExecuteDevSetSpireLensViewStatsEnabled(Dictionary<string, JsonElement> data)
