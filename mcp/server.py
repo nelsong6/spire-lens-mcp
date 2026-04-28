@@ -412,6 +412,15 @@ async def _lookup_catalog_unique(action: str, kind: str, query: str, prefix: str
     else:
         data = json.loads(await _catalog_post({"action": action, "query": lookup_query, "max_matches": 10}))
     status = data.get("status")
+    if status == "ambiguous" and prefix is not None:
+        exact_id = lookup_query.strip().upper()
+        exact_matches = [
+            item for item in data.get("matches", [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip().upper() == exact_id
+        ]
+        if len(exact_matches) == 1:
+            data = {"status": "ok", kind: exact_matches[0]}
+            status = "ok"
     if status != "ok":
         error = data.get("error") or f"status={status}"
         raise ValueError(f"Invalid {kind} id {query!r}: {error}")
