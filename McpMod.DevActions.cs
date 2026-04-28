@@ -134,8 +134,7 @@ public static partial class McpMod
         int? currentProfileId = null;
         try
         {
-            if (saveManager.IsProfileInitialized)
-                currentProfileId = saveManager.CurrentProfileId;
+            currentProfileId = saveManager.CurrentProfileId;
         }
         catch
         {
@@ -145,7 +144,7 @@ public static partial class McpMod
         return new Dictionary<string, object?>
         {
             ["status"] = "ok",
-            ["profile_initialized"] = SafeValue(() => saveManager.IsProfileInitialized),
+            ["profile_initialized"] = currentProfileId.HasValue,
             ["current_profile_id"] = currentProfileId,
             ["has_run_save"] = SafeValue(() => saveManager.HasRunSave),
             ["has_multiplayer_run_save"] = SafeValue(() => saveManager.HasMultiplayerRunSave),
@@ -595,7 +594,7 @@ public static partial class McpMod
         if (NGame.Instance == null)
             throw new InvalidOperationException("NGame.Instance is not available.");
 
-        await RunManager.Instance.SetUpSavedSinglePlayer(runState, save);
+        RunManager.Instance.SetUpSavedSinglePlayer(runState, save);
         NGame.Instance.ReactionContainer.InitializeNetworking(new NetSingleplayerGameService());
         await NGame.Instance.LoadRun(runState, save.PreFinishedRoom);
     }
