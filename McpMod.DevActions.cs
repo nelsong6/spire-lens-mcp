@@ -78,6 +78,7 @@ public static partial class McpMod
             "dev_replace_run_deck_and_save" => ExecuteDevReplaceRunDeckAndSave(data),
             "dev_enter_room" => ExecuteDevEnterRoom(data),
             "dev_configure_live_combat" => ExecuteDevConfigureLiveCombat(data),
+            "dev_refresh_combat_view" => ExecuteDevRefreshCombatView(),
             "dev_set_spirelens_view_stats_enabled" => ExecuteDevSetSpireLensViewStatsEnabled(data),
             "dev_open_card_pile" => ExecuteDevOpenCardPile(data),
             "dev_close_card_pile" => ExecuteDevCloseCardPile(),
@@ -857,6 +858,115 @@ public static partial class McpMod
             ["player_powers"] = playerPowers,
             ["enemy_powers"] = enemyPowers,
             ["next_step"] = "Use get_game_state to confirm combat properties, then continue with normal gameplay MCP actions."
+        };
+    }
+
+    private static Dictionary<string, object?> ExecuteDevRefreshCombatView()
+    {
+        if (!CombatManager.Instance.IsInProgress)
+            return Error("No combat in progress.");
+
+        var room = NCombatRoom.Instance;
+        if (room == null)
+            return Error("NCombatRoom.Instance is null; combat UI is not active.");
+
+        var combatState = CombatManager.Instance.DebugOnlyGetState();
+        if (combatState == null)
+            return Error("Combat state is unavailable.");
+
+        // Debug-loaded mid-combat saves mutate creature/energy state without raising the
+        // CombatStateChanged signal the HUD widgets subscribe to, so their bound values render
+        // stale (placeholder HP bars, 0 energy). Re-fire the same handlers the game uses so the
+        // widgets repaint from the live model.
+        var creatureResults = new List<Dictionary<string, object?>>();
+        foreach (var node in room.CreatureNodes.ToList())
+        {
+            var entry = new Dictionary<string, object?>();
+            try
+            {
+                var entity = node.Entity;
+                entry["entity_name"] = SafeGetText(() => entity?.Name);
+                entry["entity_hp"] = entity?.CurrentHp;
+                entry["entity_max_hp"] = entity?.MaxHp;
+
+                var display = node.GetType()
+                    .GetField("_stateDisplay", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.GetValue(node);
+                if (display == null)
+                {
+                    entry["display"] = "null";
+                    creatureResults.Add(entry);
+                    continue;
+                }
+
+                var displayType = display.GetType();
+                var boundCreature = displayType
+                    .GetField("_creature", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.GetValue(display) as Creature;
+                entry["display_bound_name"] = SafeGetText(() => boundCreature?.Name);
+                entry["display_bound_hp"] = boundCreature?.CurrentHp;
+                entry["display_bound_max_hp"] = boundCreature?.MaxHp;
+                entry["display_bound_matches_entity"] = ReferenceEquals(boundCreature, entity);
+
+                displayType.GetMethod("OnCombatStateChanged", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.Invoke(display, new object[] { combatState });
+                displayType.GetMethod("RefreshValues", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.Invoke(display, null);
+                entry["refreshed"] = true;
+            }
+            catch (TargetInvocationException ex)
+            {
+                var inner = ex.InnerException?.GetBaseException() ?? ex.GetBaseException();
+                entry["refreshed"] = false;
+                entry["error"] = $"{inner.GetType().Name}: {inner.Message}";
+            }
+            catch (Exception ex)
+            {
+                entry["refreshed"] = false;
+                entry["error"] = ex.GetBaseException().Message;
+            }
+            creatureResults.Add(entry);
+        }
+
+        var energyResult = new Dictionary<string, object?> { ["status"] = "not_available" };
+        try
+        {
+            var ui = room.Ui;
+            var energyCounter = ui?.GetType()
+                .GetField("_energyCounter", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.GetValue(ui);
+            if (energyCounter != null)
+            {
+                var ecType = energyCounter.GetType();
+                ecType.GetMethod("OnCombatStateChanged", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.Invoke(energyCounter, new object[] { combatState });
+                ecType.GetMethod("RefreshLabel", BindingFlags.Instance | BindingFlags.NonPublic)
+                    ?.Invoke(energyCounter, null);
+                energyResult["status"] = "ok";
+            }
+        }
+        catch (TargetInvocationException ex)
+        {
+            var inner = ex.InnerException?.GetBaseException() ?? ex.GetBaseException();
+            energyResult["status"] = "error";
+            energyResult["error"] = $"{inner.GetType().Name}: {inner.Message}";
+        }
+        catch (Exception ex)
+        {
+            energyResult["status"] = "error";
+            energyResult["error"] = ex.GetBaseException().Message;
+        }
+
+        var handResult = RefreshVisibleHand(combatState);
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = "Re-fired combat-HUD refresh on creature displays, energy counter, and hand.",
+            ["creatures"] = creatureResults,
+            ["energy"] = energyResult,
+            ["hand"] = handResult,
+            ["next_step"] = "Capture a screenshot to confirm HP bars and energy now match get_game_state."
         };
     }
 
