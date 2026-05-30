@@ -6,6 +6,10 @@ requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.7.1",
     "httpx>=0.25.0",
+    # Imported directly by server.py's --transport http path. Already pulled in
+    # transitively by mcp, but server.py imports them by name, so declare them.
+    "starlette>=0.37.0",
+    "uvicorn>=0.30.0",
 ]
 
 [project.scripts]
