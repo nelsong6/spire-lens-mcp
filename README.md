@@ -7,7 +7,7 @@ Vendored from [`Gennadiyev/STS2MCP`](https://github.com/Gennadiyev/STS2MCP) v0.3
 ## Components
 
 - **C# mod** (`McpMod.*.cs`, [`SpireLensMcpBridge.csproj`](SpireLensMcpBridge.csproj)) — built into `SpireLensMcpBridge.dll`, copied to `<game_install>/mods/`. Opens an `HttpListener` on `localhost:15526` and dispatches to handlers for game-state queries and action commands.
-- **Python MCP server** (`mcp/server.py`) — stdio MCP server that connects to the in-game listener and exposes ~50 tools (`combat_play_card`, `relic_select`, `get_game_state`, etc.). Used by Claude Code via the consuming repo's `.mcp.json`.
+- **Python MCP server** (`mcp/server.py`) — MCP server that connects to the in-game listener and exposes ~50 tools (`combat_play_card`, `relic_select`, `get_game_state`, etc.). Used by Claude Code via the consuming repo's `.mcp.json`. Speaks `stdio` by default; pass `--transport http` to serve remote clients (see [Remote clients](#remote-clients-http-transport)).
 
 ## Build
 
@@ -71,6 +71,46 @@ Add to a consumer's `.mcp.json` (e.g. SpireLens's) — pointing at the local che
   }
 }
 ```
+
+### Remote clients (HTTP transport)
+
+`stdio` requires the MCP client to live on the same machine as the server, because
+the server talks to the in-game bridge over `localhost:15526`. When the client runs
+elsewhere — a Glimmung/tank session pod on the tailnet driving a run on the game
+host — start the server in HTTP mode **on the game host** instead and point the
+remote client at it. No port-forward needed.
+
+On the game host, bind to its Tailscale IP:
+
+```powershell
+uv run --directory D:\repos\spire-lens-mcp\mcp python server.py `
+  --transport http --bind-host <host-tailscale-ip> --bind-port 15527
+```
+
+The server still reaches the game over the local `--host`/`--port` bridge, so it
+survives game restarts and reconnects on its own. `--bind-host` defaults to
+loopback so `--transport http` is never accidentally world-reachable; set it to
+the Tailscale IP to accept remote clients. Keep `--bind-port` (MCP, default
+`15527`) distinct from `--port` (the in-game bridge, `15526`).
+
+Point the remote client's `.mcp.json` at it:
+
+```json
+{
+  "mcpServers": {
+    "sts2-modding": {
+      "type": "http",
+      "url": "http://<host-tailscale-ip>:15527/mcp"
+    }
+  }
+}
+```
+
+Access control is the network layer: bind to the Tailscale interface and rely on
+tailnet ACLs against `tag:spirelens-host`. For defense in depth, set a shared
+secret with `--auth-token <token>` (or `$SPIRELENS_MCP_TOKEN`); clients must then
+send `Authorization: Bearer <token>` — add `"headers": {"Authorization": "Bearer <token>"}`
+to the `.mcp.json` entry.
 
 ## License
 

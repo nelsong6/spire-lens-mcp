@@ -2247,18 +2247,83 @@ async def mp_crystal_sphere_proceed() -> str:
         return _handle_error(e)
 
 
+def _run_http(bind_host: str, bind_port: int, auth_token: str | None) -> None:
+    """Serve the MCP tools over Streamable HTTP at /mcp.
+
+    Lets a remote client (a tank/glimmung session pod on the tailnet) connect
+    without stdio co-location or a port-forward: run this once on the game host,
+    bind it to the host's Tailscale IP, and point the client's .mcp.json at
+    http://<host-tailscale-ip>:<bind_port>/mcp. The server still talks to the
+    in-game bridge over the local _base_url, so it survives game restarts and
+    reconnects on its own.
+    """
+    mcp.settings.host = bind_host
+    mcp.settings.port = bind_port
+
+    if not auth_token:
+        # Transport-only switch; access control delegated to the network layer
+        # (bind to a Tailscale interface + tailnet ACLs on tag:spirelens-host).
+        mcp.run(transport="streamable-http")
+        return
+
+    # Optional shared-secret gate for defense in depth even on a trusted tailnet.
+    import uvicorn
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    app = mcp.streamable_http_app()
+
+    async def _require_token(request, call_next):
+        if request.headers.get("authorization", "") != f"Bearer {auth_token}":
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
+
+    app.add_middleware(BaseHTTPMiddleware, dispatch=_require_token)
+    uvicorn.run(app, host=bind_host, port=bind_port)
+
+
 def main():
     parser = argparse.ArgumentParser(description="spire-lens-mcp server")
-    parser.add_argument("--port", type=int, default=15526, help="Game HTTP server port")
-    parser.add_argument("--host", type=str, default="localhost", help="Game HTTP server host")
+    parser.add_argument("--port", type=int, default=15526, help="Game HTTP bridge port (the in-game listener)")
+    parser.add_argument("--host", type=str, default="localhost", help="Game HTTP bridge host (the in-game listener)")
     parser.add_argument("--no-trust-env", action="store_true", help="Ignore HTTP_PROXY/HTTPS_PROXY environment variables")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="MCP transport. 'stdio' (default): the client spawns this process locally over a pipe. "
+        "'http': serve Streamable HTTP so remote clients can connect (e.g. across a tailnet).",
+    )
+    parser.add_argument(
+        "--bind-host",
+        type=str,
+        default="127.0.0.1",
+        help="[--transport http] address to serve MCP on. Set to the host's Tailscale IP to accept "
+        "remote clients; defaults to loopback so 'http' is never accidentally world-reachable.",
+    )
+    parser.add_argument(
+        "--bind-port",
+        type=int,
+        default=15527,
+        help="[--transport http] port to serve MCP on (kept distinct from the game bridge --port).",
+    )
+    parser.add_argument(
+        "--auth-token",
+        type=str,
+        default=os.environ.get("SPIRELENS_MCP_TOKEN"),
+        help="[--transport http] optional shared secret; clients must send 'Authorization: Bearer <token>'. "
+        "Defaults to $SPIRELENS_MCP_TOKEN.",
+    )
     args = parser.parse_args()
 
     global _base_url, _trust_env
     _base_url = f"http://{args.host}:{args.port}"
     _trust_env = not args.no_trust_env
 
-    mcp.run(transport="stdio")
+    if args.transport == "http":
+        _run_http(args.bind_host, args.bind_port, args.auth_token)
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
