@@ -7,7 +7,10 @@ no live JWKS endpoint is required.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
+import json
+from pathlib import Path
 
 import jwt
 import pytest
@@ -140,3 +143,81 @@ def test_header_helper_requires_bearer_prefix():
     verifier = server._JwtVerifier.__new__(server._JwtVerifier)
     with pytest.raises(server._AuthError):
         verifier.verify_authorization_header("Basic abc123")
+
+
+def test_sts2_launcher_prefers_configured_scheduled_task(monkeypatch):
+    monkeypatch.setenv("SPIRELENS_HOST_STS2_LAUNCH_TASK", "SpireLens STS2 Launch")
+    monkeypatch.delenv("STS2_GAME_DIR", raising=False)
+
+    assert server._resolve_sts2_launcher() == {
+        "available": True,
+        "kind": "scheduled_task",
+        "task_name": "SpireLens STS2 Launch",
+    }
+
+
+def test_sts2_launcher_finds_executable_under_configured_game_dir(tmp_path, monkeypatch):
+    monkeypatch.delenv("SPIRELENS_HOST_STS2_LAUNCH_TASK", raising=False)
+    game_dir = tmp_path / "Slay the Spire 2"
+    game_dir.mkdir()
+    exe = game_dir / "SlayTheSpire2.exe"
+    exe.write_text("", encoding="utf-8")
+    monkeypatch.setenv("STS2_GAME_DIR", str(game_dir))
+
+    assert server._resolve_sts2_launcher() == {
+        "available": True,
+        "kind": "executable",
+        "path": str(exe),
+        "working_directory": str(game_dir),
+    }
+
+
+def test_sts2_launcher_reports_missing_executable(tmp_path, monkeypatch):
+    monkeypatch.delenv("SPIRELENS_HOST_STS2_LAUNCH_TASK", raising=False)
+    game_dir = tmp_path / "Slay the Spire 2"
+    game_dir.mkdir()
+    monkeypatch.setenv("STS2_GAME_DIR", str(game_dir))
+
+    launcher = server._resolve_sts2_launcher()
+
+    assert launcher["available"] is False
+    assert launcher["game_dir"] == str(Path(game_dir))
+    assert "SlayTheSpire2.exe" in launcher["reason"]
+
+
+def test_host_status_reports_game_not_running_with_start_action(monkeypatch):
+    async def probe_bridge():
+        return {
+            "reachable": False,
+            "error_type": "connect_error",
+            "error": "connection refused",
+        }
+
+    monkeypatch.setattr(server, "_probe_bridge", probe_bridge)
+    monkeypatch.setattr(server, "_list_sts2_processes", lambda: [])
+    monkeypatch.setenv("SPIRELENS_HOST_STS2_LAUNCH_TASK", "SpireLens STS2 Launch")
+    monkeypatch.delenv("STS2_GAME_DIR", raising=False)
+
+    status = asyncio.run(server._host_status_payload())
+
+    assert status["status"] == "game_not_running"
+    assert status["game"]["running"] is False
+    assert status["bridge"]["reachable"] is False
+    assert status["launcher"] == {
+        "available": True,
+        "kind": "scheduled_task",
+        "task_name": "SpireLens STS2 Launch",
+    }
+    assert "start_sts2" in status["next_actions"][0]
+
+
+def test_bridge_connect_error_is_structured_host_status(monkeypatch):
+    monkeypatch.setattr(server, "_list_sts2_processes", lambda: [])
+    monkeypatch.setenv("SPIRELENS_HOST_STS2_LAUNCH_TASK", "SpireLens STS2 Launch")
+    monkeypatch.delenv("STS2_GAME_DIR", raising=False)
+
+    status = json.loads(server._handle_error(server.httpx.ConnectError("connection refused")))
+
+    assert status["status"] == "game_not_running"
+    assert status["bridge"]["error_type"] == "connect_error"
+    assert status["launcher"]["kind"] == "scheduled_task"
