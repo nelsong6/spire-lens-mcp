@@ -8,13 +8,18 @@ import argparse
 import asyncio
 import base64
 import copy
+import csv
 import hashlib
 import json
 import os
+import platform
 import re
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -23,6 +28,7 @@ mcp = FastMCP("spire-lens-mcp")
 
 _base_url: str = "http://localhost:15526"
 _trust_env: bool = True
+_STS2_PROCESS_NAMES = {"slaythespire2.exe", "slaythespire2"}
 
 
 def _sp_url() -> str:
@@ -39,6 +45,243 @@ def _catalog_url() -> str:
 
 def _screenshot_url() -> str:
     return f"{_base_url}/api/v1/screenshot"
+
+
+def _json(data: dict) -> str:
+    return json.dumps(data, indent=2)
+
+
+def _bridge_port() -> int | None:
+    parsed = urlparse(_base_url)
+    return parsed.port
+
+
+def _configured_game_dir() -> Path | None:
+    configured = os.environ.get("STS2_GAME_DIR")
+    if configured and configured.strip():
+        return Path(configured)
+
+    candidates = [
+        Path(r"D:\SteamLibrary\steamapps\common\Slay the Spire 2"),
+        Path(r"C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2"),
+        Path.home() / "Library" / "Application Support" / "Steam" / "steamapps" / "common" / "Slay the Spire 2",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _list_sts2_processes() -> list[dict]:
+    if platform.system().lower() != "windows":
+        return []
+
+    try:
+        result = subprocess.run(
+            ["tasklist.exe", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+
+    processes: list[dict] = []
+    for row in csv.reader(result.stdout.splitlines()):
+        if len(row) < 5:
+            continue
+        image_name = row[0].strip()
+        if image_name.lower() not in _STS2_PROCESS_NAMES:
+            continue
+        processes.append({
+            "image_name": image_name,
+            "pid": row[1].strip(),
+            "session_name": row[2].strip(),
+            "session_number": row[3].strip(),
+            "memory": row[4].strip(),
+        })
+    return processes
+
+
+def _resolve_sts2_launcher() -> dict:
+    launch_task = os.environ.get("SPIRELENS_HOST_STS2_LAUNCH_TASK", "").strip()
+    if launch_task:
+        return {
+            "available": True,
+            "kind": "scheduled_task",
+            "task_name": launch_task,
+        }
+
+    game_dir = _configured_game_dir()
+    if game_dir is None:
+        return {
+            "available": False,
+            "kind": None,
+            "reason": "STS2_GAME_DIR is unset and no default game directory was found",
+        }
+
+    exe = game_dir / "SlayTheSpire2.exe"
+    if exe.exists():
+        return {
+            "available": True,
+            "kind": "executable",
+            "path": str(exe),
+            "working_directory": str(game_dir),
+        }
+
+    bat = game_dir / "launch_opengl.bat"
+    if bat.exists():
+        return {
+            "available": True,
+            "kind": "batch",
+            "path": str(bat),
+            "working_directory": str(game_dir),
+        }
+
+    return {
+        "available": False,
+        "kind": None,
+        "game_dir": str(game_dir),
+        "reason": "SlayTheSpire2.exe or launch_opengl.bat was not found",
+    }
+
+
+def _start_sts2_with_launcher(launcher: dict) -> dict:
+    kind = launcher.get("kind")
+    if kind == "scheduled_task":
+        task_name = str(launcher.get("task_name") or "").strip()
+        if not task_name:
+            raise RuntimeError("scheduled task launcher did not include task_name")
+        result = subprocess.run(
+            ["schtasks.exe", "/Run", "/TN", task_name],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or f"schtasks exited {result.returncode}").strip())
+        return {
+            "launcher": kind,
+            "task_name": task_name,
+            "stdout": result.stdout.strip(),
+        }
+
+    path = str(launcher.get("path") or "").strip()
+    working_directory = str(launcher.get("working_directory") or "").strip()
+    if not path:
+        raise RuntimeError("launcher did not include a path")
+
+    if kind == "batch":
+        cmd = ["cmd.exe", "/c", path] if platform.system().lower() == "windows" else [path]
+    else:
+        cmd = [path]
+    flags = 0
+    if platform.system().lower() == "windows":
+        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+    subprocess.Popen(
+        cmd,
+        cwd=working_directory or None,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+    )
+    return {
+        "launcher": kind,
+        "path": path,
+        "working_directory": working_directory,
+    }
+
+
+async def _probe_bridge(timeout: float = 5.0) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=_trust_env) as client:
+            r = await client.get(f"{_base_url}/")
+            body: object
+            try:
+                body = r.json()
+            except Exception:
+                body = r.text
+            if 200 <= r.status_code < 400:
+                return {
+                    "reachable": True,
+                    "status_code": r.status_code,
+                    "body": body,
+                }
+            return {
+                "reachable": False,
+                "status_code": r.status_code,
+                "body": body,
+                "error_type": "http_status",
+            }
+    except httpx.ConnectError as e:
+        return {
+            "reachable": False,
+            "error_type": "connect_error",
+            "error": str(e),
+        }
+    except httpx.TimeoutException as e:
+        return {
+            "reachable": False,
+            "error_type": "timeout",
+            "error": str(e),
+        }
+    except Exception as e:
+        return {
+            "reachable": False,
+            "error_type": e.__class__.__name__,
+            "error": str(e),
+        }
+
+
+def _classify_host_status(bridge: dict) -> dict:
+    processes = _list_sts2_processes()
+    game_running = len(processes) > 0
+    game_dir = _configured_game_dir()
+    launcher = _resolve_sts2_launcher()
+
+    if bridge.get("reachable"):
+        status = "ready"
+        diagnosis = "The in-game SpireLens MCP bridge is reachable."
+        next_actions: list[str] = []
+    elif not game_running:
+        status = "game_not_running"
+        diagnosis = "STS2 is not running on the MCP host, so localhost bridge port 15526 is absent."
+        next_actions = ["Call start_sts2 to launch STS2 on the MCP host, then re-run bridge_health."]
+    else:
+        status = "bridge_unreachable"
+        diagnosis = "STS2 appears to be running, but the in-game bridge is not reachable. Check that SpireLensMcpBridge is installed and enabled in the mod set."
+        next_actions = ["Check STS2 mod loading/logs, or restart STS2 after confirming SpireLensMcpBridge is installed."]
+
+    return {
+        "status": status,
+        "diagnosis": diagnosis,
+        "mcp_server": {
+            "status": "ok",
+            "note": "This response came from the host-side spire-lens-mcp server.",
+        },
+        "game": {
+            "running": game_running,
+            "processes": processes,
+            "game_dir": str(game_dir) if game_dir else None,
+        },
+        "bridge": {
+            "base_url": _base_url,
+            "port": _bridge_port(),
+            **bridge,
+        },
+        "launcher": launcher,
+        "next_actions": next_actions,
+    }
+
+
+async def _host_status_payload() -> dict:
+    return _classify_host_status(await _probe_bridge())
 
 
 async def _get(params: dict | None = None) -> str:
@@ -565,7 +808,17 @@ def _save_viewport_png(output_path: Path, metadata: dict) -> dict:
 
 def _handle_error(e: Exception) -> str:
     if isinstance(e, httpx.ConnectError):
-        return "Error: Cannot connect to SpireLensMcpBridge at localhost:15526. Is STS2 running with the bridge mod enabled?"
+        return _json(_classify_host_status({
+            "reachable": False,
+            "error_type": "connect_error",
+            "error": str(e),
+        }))
+    if isinstance(e, httpx.TimeoutException):
+        return _json(_classify_host_status({
+            "reachable": False,
+            "error_type": "timeout",
+            "error": str(e),
+        }))
     if isinstance(e, httpx.HTTPStatusError):
         return f"Error: HTTP {e.response.status_code} — {e.response.text}"
     return f"Error: {e}"
@@ -1149,12 +1402,83 @@ async def reload_spirelens_core() -> str:
 
 @mcp.tool()
 async def bridge_health() -> str:
-    """Check whether the in-game SpireLens MCP HTTP bridge is reachable."""
+    """Return structured host/game/bridge health for the SpireLens workflow.
+
+    Use this before game-dependent tools. It distinguishes:
+    - the remote host MCP server is reachable (this tool returned at all)
+    - STS2 is not running on the game host
+    - STS2 is running but the in-game bridge/mod is not listening
+    - the in-game bridge is ready
+    """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{_base_url}/")
-            r.raise_for_status()
-            return r.text
+        return _json(await _host_status_payload())
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def get_host_status() -> str:
+    """Inspect the host-side SpireLens runtime without mutating game state.
+
+    This is the diagnostic entry point for Tank/Glimmung sessions. It reports
+    whether the host MCP is alive, whether STS2 is running, whether the in-game
+    bridge port is reachable, what launcher is available, and which next action
+    is appropriate.
+    """
+    try:
+        return _json(await _host_status_payload())
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def start_sts2(wait_for_bridge: bool = True, timeout_seconds: int = 90) -> str:
+    """Start Slay the Spire 2 on the MCP host and optionally wait for the bridge.
+
+    Safe to call when STS2 is already running: it will not start a duplicate
+    game process. On the SpireLens laptop this prefers the configured
+    `SPIRELENS_HOST_STS2_LAUNCH_TASK` scheduled task so the GUI starts in the
+    interactive user session; otherwise it falls back to SlayTheSpire2.exe under
+    STS2_GAME_DIR / common Steam paths.
+
+    Args:
+        wait_for_bridge: Poll bridge_health until the in-game bridge is ready.
+        timeout_seconds: Maximum wait time when wait_for_bridge is true.
+    """
+    try:
+        before = await _host_status_payload()
+        if before["status"] == "ready":
+            before["action"] = "already_ready"
+            return _json(before)
+
+        if before["game"]["running"]:
+            before["action"] = "already_running"
+            if not wait_for_bridge:
+                return _json(before)
+        else:
+            launcher = before.get("launcher") or {}
+            if not launcher.get("available"):
+                before["action"] = "cannot_start"
+                return _json(before)
+            before["start_result"] = _start_sts2_with_launcher(launcher)
+            before["action"] = "started"
+            if not wait_for_bridge:
+                return _json(before)
+
+        timeout = max(0, min(int(timeout_seconds), 300))
+        deadline = time.monotonic() + timeout
+        last = before
+        while time.monotonic() < deadline:
+            await asyncio.sleep(3)
+            last = await _host_status_payload()
+            if last["status"] == "ready":
+                last["action"] = "started_and_ready" if before.get("action") == "started" else "already_running_ready"
+                last["waited_seconds"] = max(0, timeout - int(deadline - time.monotonic()))
+                return _json(last)
+
+        last["action"] = "started_bridge_not_ready" if before.get("action") == "started" else "already_running_bridge_not_ready"
+        last["waited_seconds"] = timeout
+        return _json(last)
     except Exception as e:
         return _handle_error(e)
 
@@ -2516,4 +2840,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

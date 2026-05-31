@@ -47,6 +47,13 @@ Expected:
 
 `Connection refused` means the mod isn't loaded — check that mods are enabled in the game's settings.
 
+When driving STS2 through the MCP server, use `bridge_health` or
+`get_host_status` first. These tools run on the host-side MCP server and return
+structured JSON for the common startup states: host MCP reachable, STS2 not
+running, STS2 running without the in-game bridge, or bridge ready. On hosts with
+a configured launcher, call `start_sts2` to launch the game and optionally poll
+until the bridge becomes reachable.
+
 ## MCP server
 
 Requires [Python 3.11+](https://www.python.org/) and [uv](https://docs.astral.sh/uv/). First run installs the locked dependencies from `mcp/uv.lock`:
