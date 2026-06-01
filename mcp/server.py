@@ -198,6 +198,69 @@ def _start_sts2_with_launcher(launcher: dict) -> dict:
     }
 
 
+def _stop_sts2_processes(processes: list[dict]) -> dict:
+    if not processes:
+        return {
+            "requested": False,
+            "reason": "no_sts2_processes",
+            "processes": [],
+        }
+
+    if platform.system().lower() != "windows":
+        return {
+            "requested": False,
+            "reason": "unsupported_platform",
+            "platform": platform.system(),
+            "processes": processes,
+        }
+
+    results: list[dict] = []
+    for process in processes:
+        pid = str(process.get("pid") or "").strip()
+        entry = {
+            "pid": pid,
+            "image_name": process.get("image_name"),
+        }
+        if not pid.isdigit():
+            entry.update({
+                "requested": False,
+                "success": False,
+                "error": "invalid_pid",
+            })
+            results.append(entry)
+            continue
+
+        try:
+            result = subprocess.run(
+                ["taskkill.exe", "/F", "/T", "/PID", pid],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            entry.update({
+                "requested": True,
+                "success": result.returncode == 0,
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+            })
+        except Exception as e:
+            entry.update({
+                "requested": True,
+                "success": False,
+                "error_type": e.__class__.__name__,
+                "error": str(e),
+            })
+        results.append(entry)
+
+    return {
+        "requested": True,
+        "processes": results,
+        "success": all(item.get("success") for item in results),
+    }
+
+
 async def _probe_bridge(timeout: float = 5.0) -> dict:
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=_trust_env) as client:
@@ -256,7 +319,7 @@ def _classify_host_status(bridge: dict) -> dict:
     else:
         status = "bridge_unreachable"
         diagnosis = "STS2 appears to be running, but the in-game bridge is not reachable. Check that SpireLensMcpBridge is installed and enabled in the mod set."
-        next_actions = ["Check STS2 mod loading/logs, or restart STS2 after confirming SpireLensMcpBridge is installed."]
+        next_actions = ["Check STS2 mod loading/logs, or call restart_sts2 after confirming SpireLensMcpBridge is installed."]
 
     return {
         "status": status,
@@ -1479,6 +1542,78 @@ async def start_sts2(wait_for_bridge: bool = True, timeout_seconds: int = 90) ->
         last["action"] = "started_bridge_not_ready" if before.get("action") == "started" else "already_running_bridge_not_ready"
         last["waited_seconds"] = timeout
         return _json(last)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def stop_sts2(wait_for_exit: bool = True, timeout_seconds: int = 45) -> str:
+    """Stop Slay the Spire 2 on the MCP host and optionally wait for exit.
+
+    This is host-side lifecycle control: it does not depend on the in-game
+    bridge being reachable. Use it to reset STS2 before validating the cold
+    `start_sts2(wait_for_bridge=true)` path or to clean up after live testing.
+
+    Args:
+        wait_for_exit: Poll host status until no STS2 process remains.
+        timeout_seconds: Maximum wait time when wait_for_exit is true.
+    """
+    try:
+        before = await _host_status_payload()
+        if not before["game"]["running"]:
+            before["action"] = "already_stopped"
+            return _json(before)
+
+        before["stop_result"] = _stop_sts2_processes(before["game"]["processes"])
+        before["action"] = "stop_requested"
+        if not wait_for_exit:
+            return _json(before)
+
+        timeout = max(0, min(int(timeout_seconds), 300))
+        deadline = time.monotonic() + timeout
+        last = before
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1)
+            last = await _host_status_payload()
+            if not last["game"]["running"]:
+                last["action"] = "stopped"
+                last["stop_result"] = before["stop_result"]
+                last["waited_seconds"] = max(0, timeout - int(deadline - time.monotonic()))
+                return _json(last)
+
+        last["action"] = "stop_timeout"
+        last["stop_result"] = before["stop_result"]
+        last["waited_seconds"] = timeout
+        return _json(last)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def restart_sts2(wait_for_bridge: bool = True, timeout_seconds: int = 90) -> str:
+    """Restart Slay the Spire 2 on the MCP host and optionally wait for bridge readiness.
+
+    This combines `stop_sts2(wait_for_exit=true)` and `start_sts2`, returning a
+    structured status payload with both stop and start details.
+
+    Args:
+        wait_for_bridge: Poll bridge_health until the in-game bridge is ready.
+        timeout_seconds: Maximum wait time for the stop/start sequence.
+    """
+    try:
+        timeout = max(0, min(int(timeout_seconds), 300))
+        deadline = time.monotonic() + timeout
+
+        stop_result = json.loads(await stop_sts2(wait_for_exit=True, timeout_seconds=timeout))
+        if stop_result.get("action") == "stop_timeout":
+            stop_result["action"] = "restart_stop_timeout"
+            return _json(stop_result)
+
+        remaining = max(0, int(deadline - time.monotonic()))
+        start_result = json.loads(await start_sts2(wait_for_bridge=wait_for_bridge, timeout_seconds=remaining))
+        start_result["action"] = "restarted_ready" if start_result.get("status") == "ready" else "restart_incomplete"
+        start_result["stop_result"] = stop_result
+        return _json(start_result)
     except Exception as e:
         return _handle_error(e)
 
