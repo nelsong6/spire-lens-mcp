@@ -1,5 +1,18 @@
 # MCP Tools
 
+## Host Lifecycle
+
+These tools run in the host-side MCP process and do not require the in-game
+bridge to be reachable.
+
+| Tool | Scope | Description |
+|---|---|---|
+| `get_host_status()` | Host | Report host MCP, STS2 process, bridge, launcher, and next actions |
+| `bridge_health()` | Host | Return structured game/bridge health before game-dependent tools |
+| `start_sts2(wait_for_bridge?, timeout_seconds?)` | Host | Launch STS2 if needed and optionally wait for bridge readiness |
+| `stop_sts2(wait_for_exit?, timeout_seconds?)` | Host | Stop STS2 and optionally wait until no game process remains |
+| `restart_sts2(wait_for_bridge?, timeout_seconds?)` | Host | Stop then start STS2 and optionally wait for bridge readiness |
+
 ## Singleplayer
 
 | Tool | Scope | Description |

@@ -221,3 +221,134 @@ def test_bridge_connect_error_is_structured_host_status(monkeypatch):
     assert status["status"] == "game_not_running"
     assert status["bridge"]["error_type"] == "connect_error"
     assert status["launcher"]["kind"] == "scheduled_task"
+
+
+def test_stop_sts2_processes_uses_taskkill_on_windows(monkeypatch):
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "SUCCESS"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return Result()
+
+    monkeypatch.setattr(server.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+
+    result = server._stop_sts2_processes([
+        {
+            "image_name": "SlayTheSpire2.exe",
+            "pid": "61248",
+        }
+    ])
+
+    assert result["requested"] is True
+    assert result["success"] is True
+    assert result["processes"][0]["success"] is True
+    assert calls[0][0] == ["taskkill.exe", "/F", "/T", "/PID", "61248"]
+    assert calls[0][1]["timeout"] == 20
+
+
+def test_stop_sts2_returns_already_stopped_without_stop_request(monkeypatch):
+    async def host_status():
+        return {
+            "status": "game_not_running",
+            "game": {
+                "running": False,
+                "processes": [],
+            },
+        }
+
+    def fail_stop(_processes):
+        raise AssertionError("stop should not be requested")
+
+    monkeypatch.setattr(server, "_host_status_payload", host_status)
+    monkeypatch.setattr(server, "_stop_sts2_processes", fail_stop)
+
+    result = json.loads(asyncio.run(server.stop_sts2()))
+
+    assert result["action"] == "already_stopped"
+    assert result["status"] == "game_not_running"
+
+
+def test_stop_sts2_waits_until_process_exits(monkeypatch):
+    statuses = [
+        {
+            "status": "ready",
+            "game": {
+                "running": True,
+                "processes": [
+                    {
+                        "image_name": "SlayTheSpire2.exe",
+                        "pid": "61248",
+                    }
+                ],
+            },
+        },
+        {
+            "status": "game_not_running",
+            "game": {
+                "running": False,
+                "processes": [],
+            },
+        },
+    ]
+
+    async def host_status():
+        return statuses.pop(0)
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(server, "_host_status_payload", host_status)
+    monkeypatch.setattr(server, "_stop_sts2_processes", lambda _processes: {"requested": True, "success": True})
+    monkeypatch.setattr(server.asyncio, "sleep", no_sleep)
+
+    result = json.loads(asyncio.run(server.stop_sts2(wait_for_exit=True, timeout_seconds=5)))
+
+    assert result["action"] == "stopped"
+    assert result["status"] == "game_not_running"
+    assert result["stop_result"] == {"requested": True, "success": True}
+
+
+def test_restart_sts2_combines_stop_and_start(monkeypatch):
+    async def fake_stop_sts2(wait_for_exit=True, timeout_seconds=45):
+        assert wait_for_exit is True
+        assert timeout_seconds == 30
+        return json.dumps({
+            "action": "stopped",
+            "status": "game_not_running",
+            "game": {
+                "running": False,
+                "processes": [],
+            },
+        })
+
+    async def fake_start_sts2(wait_for_bridge=True, timeout_seconds=90):
+        assert wait_for_bridge is True
+        assert 0 <= timeout_seconds <= 30
+        return json.dumps({
+            "action": "started_and_ready",
+            "status": "ready",
+            "game": {
+                "running": True,
+                "processes": [
+                    {
+                        "image_name": "SlayTheSpire2.exe",
+                        "pid": "61248",
+                    }
+                ],
+            },
+        })
+
+    monkeypatch.setattr(server, "stop_sts2", fake_stop_sts2)
+    monkeypatch.setattr(server, "start_sts2", fake_start_sts2)
+
+    result = json.loads(asyncio.run(server.restart_sts2(wait_for_bridge=True, timeout_seconds=30)))
+
+    assert result["action"] == "restarted_ready"
+    assert result["status"] == "ready"
+    assert result["stop_result"]["action"] == "stopped"
