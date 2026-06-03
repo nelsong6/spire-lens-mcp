@@ -1,6 +1,6 @@
 # SpireLens MCP
 
-HTTP bridge mod for [**Slay the Spire 2**](https://store.steampowered.com/app/2868840/Slay_the_Spire_2/) used by [SpireLens](https://github.com/nelsong6/spirelens) for live-game agentic validation. Exposes game state and actions on `localhost:15526` for the bundled Python MCP server, which Claude Code and other MCP clients can use to drive runs.
+HTTP bridge mod for [**Slay the Spire 2**](https://store.steampowered.com/app/2868840/Slay_the_Spire_2/) used by [SpireLens](https://github.com/romaine-life/spirelens) for live-game agentic validation. Exposes game state and actions on `localhost:15526` for the bundled Python MCP server, which Claude Code and other MCP clients can use to drive runs.
 
 Vendored from [`Gennadiyev/STS2MCP`](https://github.com/Gennadiyev/STS2MCP) v0.3.4 under MIT — see [`AUTHORS.md`](AUTHORS.md) for attribution and the rationale for forking.
 
@@ -29,7 +29,7 @@ mod_manifest.json                              ->  <game_install>/mods/SpireLens
 
 (The mod loader expects a folder named after the mod ID with the manifest renamed to `<id>.json`. The mod ID is `SpireLensMcpBridge` per `mod_manifest.json`.)
 
-> **Build breaking after an STS2 update?** The game ships roughly every two weeks and routinely renames or removes the C# game symbols this bridge compiles and reflects against. Before re-diagnosing from scratch, read [**Surviving STS2 updates**](https://github.com/nelsong6/spirelens/blob/main/docs/surviving-sts2-updates.md) in the SpireLens repo — it catalogs the recurring failure modes (build drift, BaseLib desync / frozen HUD, debug-load HUD desync) with concrete symptom → cause → fix.
+> **Build breaking after an STS2 update?** The game ships roughly every two weeks and routinely renames or removes the C# game symbols this bridge compiles and reflects against. Before re-diagnosing from scratch, read [**Surviving STS2 updates**](https://github.com/romaine-life/spirelens/blob/main/docs/surviving-sts2-updates.md) in the SpireLens repo — it catalogs the recurring failure modes (build drift, BaseLib desync / frozen HUD, debug-load HUD desync) with concrete symptom → cause → fix.
 
 ## Verify
 

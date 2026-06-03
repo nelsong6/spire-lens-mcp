@@ -6,7 +6,7 @@
 
 ## Fork
 
-This fork is maintained by **nelsong6** as the live-validation bridge for [SpireLens](https://github.com/nelsong6/spirelens). The vendor was performed on 2026-04-24 because the SpireLens roadmap needs reinforcement-learning-shaped extensions (decision-point state snapshots, custom event-stream tools, run-archive search) that don't fit the original project's scope, and tracking those as patches against an upstream we don't control would be more work than owning the fork.
+This fork is maintained by **nelsong6** as the live-validation bridge for [SpireLens](https://github.com/romaine-life/spirelens). The vendor was performed on 2026-04-24 because the SpireLens roadmap needs reinforcement-learning-shaped extensions (decision-point state snapshots, custom event-stream tools, run-archive search) that don't fit the original project's scope, and tracking those as patches against an upstream we don't control would be more work than owning the fork.
 
 The initial vendor commit is a near-pure rename:
 
